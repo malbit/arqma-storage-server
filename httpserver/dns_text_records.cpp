@@ -8,8 +8,8 @@
 
 using json = nlohmann::json;
 
-static constexpr char POW_DIFFICULTY_URL[] = "sentinel.messenger.arqma.network";
-static constexpr char LATEST_VERSION_URL[] = "storage.version.arqma.network";
+static constexpr char POW_DIFFICULTY_URL[] = "sentinel.messenger.arqma.com";
+static constexpr char LATEST_VERSION_URL[] = "storage.version.arqma.com";
 
 namespace arqma {
 
@@ -25,7 +25,7 @@ static std::string get_dns_record(const char* url, std::error_code& ec) {
 
     int response =
         res_query(url, ns_c_in, ns_t_txt, query_buffer, sizeof(query_buffer));
-    
+
     if (response == -1) {
         ARQMA_LOG(warn, "res_query failed while retrieving dns entry");
         ec = std::make_error_code(std::errc::bad_message);

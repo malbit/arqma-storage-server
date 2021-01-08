@@ -269,9 +269,9 @@ void ServiceNode::bootstrap_data() {
     params["fields"] = fields;
 
     std::vector<std::pair<std::string, uint16_t>> seed_nodes{
-        {{"storage.seed1.arqma.network", 22023},
-         {"storage.seed2.arqma.network", 38157},
-         {"imaginary.stream", 38157}}};
+        {{"eu.supportarqma.com", 19994},
+         {"eu.supportarqma.com", 39994},
+         {"us.supportarqma.com", 39994}}};
 
     auto req_counter = std::make_shared<int>(0);
 

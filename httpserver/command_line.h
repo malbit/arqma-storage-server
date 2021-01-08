@@ -7,7 +7,7 @@ namespace arqma {
 
 struct command_line_options {
     uint16_t port;
-    uint16_t arqmad_rpc_port = 22023;
+    uint16_t arqmad_rpc_port = 19994;
     bool force_start = false;
     bool print_version = false;
     bool print_help = false;
