@@ -3,6 +3,19 @@ FROM ubuntu:xenial
 RUN apt update && apt install -y build-essential curl git cmake libssl-dev libsodium-dev wget pkg-config autoconf libtool
 WORKDIR /usr/src/app
 
+#Cmake
+ARG CMAKE_VERSION=3.14.0
+ARG CMAKE_VERSION_DOT=v3.14
+ARG CMAKE_HASH=aa76ba67b3c2af1946701f847073f4652af5cbd9f141f221c97af99127e75502
+RUN set -ex \
+    && curl -s -O https://cmake.org/files/${CMAKE_VERSION_DOT}/cmake-${CMAKE_VERSION}.tar.gz \
+    && echo "${CMAKE_HASH}  cmake-${CMAKE_VERSION}.tar.gz" | sha256sum -c \
+    && tar -xzf cmake-${CMAKE_VERSION}.tar.gz \
+    && cd cmake-${CMAKE_VERSION} \
+    && ./configure \
+    && make \
+    && make install
+    
 ## Boost
 ARG BOOST_VERSION=1_70_0
 ARG BOOST_VERSION_DOT=1.70.0
