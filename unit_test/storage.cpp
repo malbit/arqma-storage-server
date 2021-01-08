@@ -12,9 +12,9 @@
 #include <boost/test/unit_test.hpp>
 #include <boost/thread/thread.hpp>
 
-using loki::storage::Item;
+using arqma::storage::Item;
 
-using namespace loki;
+using namespace arqma;
 
 struct StorageRAIIFixture {
     StorageRAIIFixture() {

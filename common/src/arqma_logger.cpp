@@ -1,4 +1,4 @@
-#include "loki_logger.h"
+#include "arqma_logger.h"
 
 // clang-format off
 #include "spdlog/sinks/stdout_color_sinks.h"
@@ -11,7 +11,7 @@
 #include <fstream>
 #include <iostream>
 
-namespace loki {
+namespace arqma {
 
 namespace fs = boost::filesystem;
 
@@ -56,20 +56,17 @@ void init_logging(const std::string& data_dir,
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     console_sink->set_level(log_level);
 
-    // setting this to `true` can be useful for debugging on testnet
-    bool rotate_on_open = false;
-
     auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        log_location, LOG_FILE_SIZE_LIMIT, EXTRA_FILES, rotate_on_open);
+        log_location, LOG_FILE_SIZE_LIMIT, EXTRA_FILES);
     file_sink->set_level(log_level);
 
-    auto developer_sink = std::make_shared<loki::dev_sink_mt>();
+    auto developer_sink = std::make_shared<arqma::dev_sink_mt>();
 
     /// IMPORTANT: get_logs endpoint assumes that sink #3 is a dev sink
     std::vector<spdlog::sink_ptr> sinks = {console_sink, file_sink,
                                            developer_sink};
 
-    auto logger = std::make_shared<spdlog::logger>("loki_logger", sinks.begin(),
+    auto logger = std::make_shared<spdlog::logger>("arqma_logger", sinks.begin(),
                                                    sinks.end());
     logger->set_level(log_level);
     logger->flush_on(spdlog::level::err);
@@ -80,9 +77,9 @@ void init_logging(const std::string& data_dir,
 
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
 
-    LOKI_LOG(info,
+    ARQMA_LOG(info,
              "\n**************************************************************"
              "\nOutputting logs to {}",
              log_location);
 }
-} // namespace loki
+} // namespace arqma

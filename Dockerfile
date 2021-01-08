@@ -1,6 +1,6 @@
-FROM ubuntu:bionic
+FROM ubuntu:xenial
 
-RUN apt update && apt install -y build-essential curl git cmake libssl-dev libsodium-dev wget pkg-config autoconf libtool g++-8
+RUN apt update && apt install -y build-essential curl git cmake libssl-dev libsodium-dev wget pkg-config autoconf libtool
 WORKDIR /usr/src/app
 
 ## Boost
@@ -43,33 +43,17 @@ RUN set -ex \
     && make check \
     && make install
 
-RUN apt-get install -y apt-transport-https ca-certificates gnupg software-properties-common wget
-RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add -
-RUN apt-add-repository 'deb https://apt.kitware.com/ubuntu/ xenial main'
+ADD https://api.github.com/repos/arqma-project/arqma-storage-server/git/refs/heads/master version.json
 
-RUN apt-get update
-
-RUN apt-get install -y kitware-archive-keyring
-RUN apt-key --keyring /etc/apt/trusted.gpg del C1F34CDD40CD72DA
-
-RUN apt-get install -y cmake
-
-ADD https://api.github.com/repos/loki-project/loki-storage-server/git/refs/heads/master version.json
-
-RUN rm -rf loki-storage-server
-
-RUN git clone https://github.com/loki-project/loki-storage-server.git --depth=1
-
-RUN cd loki-storage-server && git submodule update --init --recursive
+RUN git clone https://github.com/arqma-project/arqma-storage-server.git --depth=1
+RUN cd arqma-storage-server && git submodule update --init
 
 ENV BOOST_ROOT /usr/src/app/boost_${BOOST_VERSION}
 
-ENV CC=gcc-8 CXX=g++-8
-
-RUN cd loki-storage-server \
+RUN cd arqma-storage-server \
     && mkdir -p build \
     && cd build \
-    && cmake .. -DBOOST_ROOT=$BOOST_ROOT -Dsodium_USE_STATIC_LIBS=ON \
-    && cmake --build . -- -j8
+    && cmake .. -DBOOST_ROOT=$BOOST_ROOT \
+    && cmake --build .
 
-RUN loki-storage-server/build/httpserver/loki-storage --version 
+RUN arqma-storage-server/build/httpserver/arqma-storage --version 

@@ -2,15 +2,15 @@
 
 /// TODO: should only be aware of messages
 #include "Item.hpp"
-#include "loki_logger.h"
+#include "arqma_logger.h"
 #include "service_node.h"
 
 #include <boost/endian/conversion.hpp>
 #include <boost/format.hpp>
 
-using loki::storage::Item;
+using arqma::storage::Item;
 
-namespace loki {
+namespace arqma {
 
 template <typename T>
 static T deserialize_integer(std::string::const_iterator& it) {
@@ -45,7 +45,7 @@ void serialize_message(std::string& res, const T& msg) {
     serialize_integer(res, msg.timestamp);
     serialize(res, msg.nonce);
 
-    LOKI_LOG(trace, "serialized message: {}", msg.data);
+    ARQMA_LOG(trace, "serialized message: {}", msg.data);
 }
 
 template void serialize_message(std::string& res, const message_t& msg);
@@ -94,11 +94,11 @@ struct string_view {
     bool empty() { return it_end <= it; }
 };
 
-static std::optional<std::string> deserialize_string(string_view& slice,
-                                                     size_t len) {
+static boost::optional<std::string> deserialize_string(string_view& slice,
+                                                       size_t len) {
 
     if (slice.size() < len) {
-        return std::nullopt;
+        return boost::none;
     }
 
     const auto res = std::string(slice.it, slice.it + len);
@@ -107,10 +107,10 @@ static std::optional<std::string> deserialize_string(string_view& slice,
     return res;
 }
 
-static std::optional<std::string> deserialize_string(string_view& slice) {
+static boost::optional<std::string> deserialize_string(string_view& slice) {
 
     if (slice.size() < sizeof(size_t))
-        return std::nullopt;
+        return boost::none;
 
     const auto len =
         deserialize_integer<size_t>(slice.it); // already increments `it`!
@@ -118,10 +118,10 @@ static std::optional<std::string> deserialize_string(string_view& slice) {
     return deserialize_string(slice, len);
 }
 
-static std::optional<uint64_t> deserialize_uint64(string_view& slice) {
+static boost::optional<uint64_t> deserialize_uint64(string_view& slice) {
 
     if (slice.size() < sizeof(uint64_t))
-        return std::nullopt;
+        return boost::none;
 
     const auto res = deserialize_integer<uint64_t>(slice.it);
 
@@ -130,7 +130,9 @@ static std::optional<uint64_t> deserialize_uint64(string_view& slice) {
 
 std::vector<message_t> deserialize_messages(const std::string& blob) {
 
-    LOKI_LOG(trace, "=== Deserializing ===");
+    ARQMA_LOG(trace, "=== Deserializing ===");
+
+    constexpr size_t PK_SIZE = 66; // characters in hex;
 
     std::vector<message_t> result;
 
@@ -139,57 +141,57 @@ std::vector<message_t> deserialize_messages(const std::string& blob) {
     while (!slice.empty()) {
 
         /// Deserialize PK
-        auto pk = deserialize_string(slice, loki::get_user_pubkey_size());
+        auto pk = deserialize_string(slice, PK_SIZE);
         if (!pk) {
-            LOKI_LOG(debug, "Could not deserialize pk");
+            ARQMA_LOG(debug, "Could not deserialize pk");
             return {};
         }
 
         /// Deserialize Hash
         auto hash = deserialize_string(slice);
         if (!hash) {
-            LOKI_LOG(debug, "Could not deserialize hash");
+            ARQMA_LOG(debug, "Could not deserialize hash");
             return {};
         }
 
         /// Deserialize Data
         auto data = deserialize_string(slice);
         if (!data) {
-            LOKI_LOG(debug, "Could not deserialize data");
+            ARQMA_LOG(debug, "Could not deserialize data");
             return {};
         }
 
         /// Deserialize TTL
         auto ttl = deserialize_uint64(slice);
         if (!ttl) {
-            LOKI_LOG(debug, "Could not deserialize ttl");
+            ARQMA_LOG(debug, "Could not deserialize ttl");
             return {};
         }
 
         /// Deserialize Timestamp
         auto timestamp = deserialize_uint64(slice);
         if (!timestamp) {
-            LOKI_LOG(debug, "Could not deserialize timestamp");
+            ARQMA_LOG(debug, "Could not deserialize timestamp");
             return {};
         }
 
         /// Deserialize Nonce
         auto nonce = deserialize_string(slice);
         if (!nonce) {
-            LOKI_LOG(debug, "Could not deserialize nonce");
+            ARQMA_LOG(debug, "Could not deserialize nonce");
             return {};
         }
 
-        LOKI_LOG(trace, "Deserialized data: {}", *data);
+        ARQMA_LOG(trace, "Deserialized data: {}", *data);
 
-        LOKI_LOG(trace, "pk: {}, msg: {}", *pk, *data);
+        ARQMA_LOG(trace, "pk: {}, msg: {}", *pk, *data);
 
         result.push_back({*pk, *data, *hash, *ttl, *timestamp, *nonce});
     }
 
-    LOKI_LOG(trace, "=== END ===");
+    ARQMA_LOG(trace, "=== END ===");
 
     return result;
 }
 
-} // namespace loki
+} // namespace arqma

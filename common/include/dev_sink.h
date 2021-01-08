@@ -1,16 +1,14 @@
 #pragma once
 
 #include <iostream>
-#include <mutex>
 #include <spdlog/sinks/base_sink.h>
 #include <vector>
 // A sink used to store most important logs for developers
 
-namespace loki {
+namespace arqma {
 
 template <typename Mutex>
 class dev_sink : public spdlog::sinks::base_sink<Mutex> {
-    using Base = spdlog::sinks::base_sink<Mutex>;
 
     // Potentially all entries will be returned in a
     // single message, so we should keep the limit
@@ -24,8 +22,8 @@ class dev_sink : public spdlog::sinks::base_sink<Mutex> {
 
   protected:
     void sink_it_(const spdlog::details::log_msg& msg) override {
-        spdlog::memory_buf_t formatted;
-        Base::formatter_->format(msg, formatted);
+        fmt::memory_buffer formatted;
+        spdlog::sinks::sink::formatter_->format(msg, formatted);
 
         if (primary_buffer_.size() >= BUFFER_SIZE) {
             secondary_buffer_ = std::move(primary_buffer_);
@@ -71,4 +69,4 @@ class dev_sink : public spdlog::sinks::base_sink<Mutex> {
 #include <mutex>
 using dev_sink_mt = dev_sink<std::mutex>;
 
-} // namespace loki
+} // namespace arqma

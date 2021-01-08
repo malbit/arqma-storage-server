@@ -5,36 +5,29 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <unordered_map>
 
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/circular_buffer.hpp>
+#include <boost/optional.hpp>
 #include <boost/thread/thread.hpp>
 
-#include "loki_common.h"
-#include "lokid_key.h"
+#include "arqma_common.h"
+#include "arqmad_key.h"
 #include "pow.hpp"
-#include "reachability_testing.h"
 #include "stats.h"
 #include "swarm.h"
 
-static constexpr size_t BLOCK_HASH_CACHE_SIZE = 30;
+static constexpr size_t BLOCK_HASH_CACHE_SIZE = 20;
 static constexpr int STORAGE_SERVER_HARDFORK = 12;
-static constexpr int ENFORCED_REACHABILITY_HARDFORK = 13;
-static constexpr int LOKIMQ_ONION_HARDFORK = 15;
 
 class Database;
 
 namespace http = boost::beast::http;
 using request_t = http::request<http::string_body>;
 
-namespace lokimq {
-struct ConnectionID;
-}
-
-namespace loki {
+namespace arqma {
 
 namespace storage {
 struct Item;
@@ -44,21 +37,13 @@ struct sn_response_t;
 struct blockchain_test_answer_t;
 struct bc_test_params_t;
 
-class LokidClient;
-class LokimqServer;
-
-namespace ss_client {
-class Request;
-enum class ReqMethod;
-using Callback = std::function<void(bool success, std::vector<std::string>)>;
-
-} // namespace ss_client
+class ArqmadClient;
 
 namespace http_server {
 class connection_t;
 }
 
-struct lokid_key_pair_t;
+struct arqmad_key_pair_t;
 
 using connection_ptr = std::shared_ptr<http_server::connection_t>;
 
@@ -81,14 +66,15 @@ class FailedRequestHandler
     uint32_t attempt_count_ = 0;
 
     /// Call this if we give up re-transmitting
-    std::function<void()> give_up_callback_;
+    boost::optional<std::function<void()>> give_up_callback_;
 
     void retry(std::shared_ptr<FailedRequestHandler>&& self);
 
   public:
-    FailedRequestHandler(boost::asio::io_context& ioc, const sn_record_t& sn,
-                         std::shared_ptr<request_t> req,
-                         std::function<void()> give_up_cb = nullptr);
+    FailedRequestHandler(
+        boost::asio::io_context& ioc, const sn_record_t& sn,
+        std::shared_ptr<request_t> req,
+        boost::optional<std::function<void()>>&& give_up_cb = boost::none);
 
     ~FailedRequestHandler();
     /// Initiates the timer for retrying (which cannot be done directly in
@@ -97,10 +83,7 @@ class FailedRequestHandler
     void init_timer();
 };
 
-/// WRONG_REQ - request was ignored as not valid (e.g. incorrect tester)
-enum class MessageTestStatus { SUCCESS, RETRY, ERROR, WRONG_REQ };
-
-enum class SnodeStatus { UNKNOWN, UNSTAKED, DECOMMISSIONED, ACTIVE };
+enum class MessageTestStatus { SUCCESS, RETRY, ERROR };
 
 /// All service node logic that is not network-specific
 class ServiceNode {
@@ -111,9 +94,7 @@ class ServiceNode {
     boost::asio::io_context& worker_ioc_;
     boost::thread worker_thread_;
 
-    // We set the default difficulty to some low value, so that we don't reject
-    // clients unnecessarily before we get the DNS record
-    pow_difficulty_t curr_pow_difficulty_{std::chrono::milliseconds(0), 1};
+    pow_difficulty_t curr_pow_difficulty_{std::chrono::milliseconds(0), 100};
     std::vector<pow_difficulty_t> pow_history_{curr_pow_difficulty_};
 
     bool force_start_ = false;
@@ -121,12 +102,10 @@ class ServiceNode {
     int hardfork_ = 0;
     uint64_t block_height_ = 0;
     uint64_t target_height_ = 0;
-    const LokidClient& lokid_client_;
+    const ArqmadClient& arqmad_client_;
     std::string block_hash_;
     std::unique_ptr<Swarm> swarm_;
     std::unique_ptr<Database> db_;
-
-    SnodeStatus status_ = SnodeStatus::UNKNOWN;
 
     sn_record_t our_address_;
 
@@ -140,105 +119,74 @@ class ServiceNode {
 
     boost::asio::steady_timer swarm_update_timer_;
 
-    boost::asio::steady_timer lokid_ping_timer_;
+    boost::asio::steady_timer arqmad_ping_timer_;
 
     boost::asio::steady_timer stats_cleanup_timer_;
 
-    boost::asio::steady_timer peer_ping_timer_;
+    /// map pubkeys to a list of connections to be notified
+    std::unordered_map<pub_key_t, listeners_t> pk_to_listeners;
 
-    /// Used to periodially send messages from relay_buffer_
-    boost::asio::steady_timer relay_timer_;
+    arqma::arqmad_key_pair_t arqmad_key_pair_;
 
-    loki::lokid_key_pair_t lokid_key_pair_;
-
-    // Need to make sure we only use this to get lmq() object and
-    // not call any method that would in turn call a method in SN
-    // causing a deadlock
-    LokimqServer& lmq_server_;
-
-    reachability_records_t reach_records_;
-
-    /// Container for recently received messages directly from
-    /// clients;
-    std::vector<message_t> relay_buffer_;
-
-    mutable all_stats_t all_stats_;
-
-    mutable std::recursive_mutex sn_mutex_;
+    void push_message(const message_t& msg);
 
     void save_if_new(const message_t& msg);
 
     // Save items to the database, notifying listeners as necessary
     void save_bulk(const std::vector<storage::Item>& items);
 
-    void on_bootstrap_update(block_update_t&& bu);
+    /// request swarm info from the blockchain
+    void update_swarms();
 
-    void on_swarm_update(block_update_t&& bu);
+    void on_bootstrap_update(const block_update_t& bu);
+
+    void on_swarm_update(const block_update_t& bu);
 
     void bootstrap_data();
 
-    void bootstrap_peers(
-        const std::vector<sn_record_t>& peers) const; // mutex not needed
+    void bootstrap_peers(const std::vector<sn_record_t>& peers) const;
 
     void bootstrap_swarms(const std::vector<swarm_id_t>& swarms) const;
 
     /// Distribute all our data to where it belongs
     /// (called when our old node got dissolved)
-    void salvage_data() const; // mutex not needed
+    void salvage_data() const;
 
     void attach_signature(std::shared_ptr<request_t>& request,
-                          const signature& sig) const; // mutex not needed
+                          const signature& sig) const;
 
-    /// Reliably push message/batch to a service node
-    void
-    relay_data_reliable(const std::string& blob,
-                        const sn_record_t& address) const; // mutex not needed
+    void attach_pubkey(std::shared_ptr<request_t>& request) const;
 
-    template <typename Message>
-    void relay_messages(
-        const std::vector<Message>& messages,
-        const std::vector<sn_record_t>& snodes) const; // mutex not needed
+    /// used on push and on swarm bootstrapping
+    void send_sn_request(const std::shared_ptr<request_t>& req,
+                         const sn_record_t& address) const;
+    void relay_messages(const std::vector<storage::Item>& messages,
+                        const std::vector<sn_record_t>& snodes) const;
 
     /// Request swarm structure from the deamon and reset the timer
     void swarm_timer_tick();
 
     void cleanup_timer_tick();
 
-    void ping_peers_tick();
-
-    void relay_buffered_messages();
-
     /// Check the latest version from DNS text record
-    void check_version_timer_tick(); // mutex not needed
+    void check_version_timer_tick();
     /// Update PoW difficulty from DNS text record
-    void
-    pow_difficulty_timer_tick(const pow_dns_callback_t cb); // mutex not needed
+    void pow_difficulty_timer_tick(const pow_dns_callback_t cb);
 
     /// Ping the storage server periodically as required for uptime proofs
-    void lokid_ping_timer_tick();
+    void arqmad_ping_timer_tick();
 
     /// Return tester/testee pair based on block_height
     bool derive_tester_testee(uint64_t block_height, sn_record_t& tester,
                               sn_record_t& testee);
 
     /// Send a request to a SN under test
-    void send_storage_test_req(const sn_record_t& testee, uint64_t test_height,
+    void send_storage_test_req(const sn_record_t& testee,
                                const storage::Item& item);
 
     void send_blockchain_test_req(const sn_record_t& testee,
-                                  bc_test_params_t params, uint64_t test_height,
+                                  bc_test_params_t params,
                                   blockchain_test_answer_t answer);
-
-    /// Report `sn` to Lokid as unreachable
-    void report_node_reachability(const sn_pub_key_t& sn, bool reachable);
-
-    void process_storage_test_response(const sn_record_t& testee,
-                                       const storage::Item& item,
-                                       uint64_t test_height,
-                                       sn_response_t&& res);
-
-    void process_reach_test_result(const sn_pub_key_t& pk, ReachType type,
-                                   bool success);
 
     /// From a peer
     void process_blockchain_test_response(sn_response_t&& res,
@@ -250,55 +198,41 @@ class ServiceNode {
     void initiate_peer_test();
 
     // Select a random message from our database, return false on error
-    bool select_random_message(storage::Item& item); // mutex not needed
-
-    // Ping some node and record its reachability
-    void test_reachability(const sn_record_t& sn); // mutex not needed
-
-    void sign_request(std::shared_ptr<request_t>& req) const;
+    bool select_random_message(storage::Item& item);
 
   public:
     ServiceNode(boost::asio::io_context& ioc,
                 boost::asio::io_context& worker_ioc, uint16_t port,
-                LokimqServer& lmq_server,
-                const loki::lokid_key_pair_t& key_pair,
-                const std::string& ed25519hex, const std::string& db_location,
-                LokidClient& lokid_client, const bool force_start);
+                const arqma::arqmad_key_pair_t& key_pair,
+                const std::string& db_location, ArqmadClient& arqmad_client,
+                const bool force_start);
 
     ~ServiceNode();
 
-    // Return info about this node as it is advertised to other nodes
-    const sn_record_t& own_address() { return our_address_; }
-
-    // Record the time of our last being tested over lmq/http
-    void update_last_ping(ReachType type);
-
-    // These two are only needed because we store stats in Service Node,
-    // might move it out later
-    void record_proxy_request();
-    void record_onion_request();
-
-    // This is new, so it does not need to support http, thus new (if temp)
-    // method
-    void send_onion_to_sn_v1(const sn_record_t& sn, const std::string& payload,
-                             const std::string& eph_key,
-                             ss_client::Callback cb) const;
-
-    /// Same as v1, but using the new protocol (ciphertext as binary)
-    void send_onion_to_sn_v2(const sn_record_t& sn, const std::string& payload,
-                             const std::string& eph_key,
-                             ss_client::Callback cb) const;
-
-    // TODO: move this eventually out of SN
-    // Send by either http or lmq
-    void send_to_sn(const sn_record_t& sn, ss_client::ReqMethod method,
-                    ss_client::Request req, ss_client::Callback cb) const;
+    mutable all_stats_t all_stats_;
 
     // Return true if the service node is ready to start running
-    bool snode_ready(std::string* reason = nullptr);
+    bool snode_ready(boost::optional<std::string&> reason);
+
+    // Register a connection as waiting for new data for pk
+    void register_listener(const std::string& pk,
+                           const connection_ptr& connection);
+
+    void remove_listener(const std::string& pk,
+                         const http_server::connection_t* const connection);
+
+    // Notify listeners of a new message for pk
+    void notify_listeners(const std::string& pk, const message_t& msg);
+
+    // Send "empty" responses to all listeners effectively resetting their
+    // connections
+    void reset_listeners();
 
     /// Process message received from a client, return false if not in a swarm
     bool process_store(const message_t& msg);
+
+    /// Process message relayed from another SN from our swarm
+    void process_push(const message_t& msg);
 
     /// Process incoming blob of messages: add to DB if new
     void process_push_batch(const std::string& blob);
@@ -314,9 +248,9 @@ class ServiceNode {
                                                const std::string& msg_hash,
                                                std::string& answer);
 
-    bool is_pubkey_for_us(const user_pubkey_t& pk) const;
+    bool is_pubkey_for_us(const std::string& pk) const;
 
-    std::vector<sn_record_t> get_snodes_by_pk(const user_pubkey_t& pk);
+    std::vector<sn_record_t> get_snodes_by_pk(const std::string& pk);
 
     bool is_snode_address_known(const std::string&);
 
@@ -332,18 +266,7 @@ class ServiceNode {
     void
     set_difficulty_history(const std::vector<pow_difficulty_t>& new_history);
 
-    // Stats for session clients that want to know the version number
-    std::string get_stats_for_session_client() const;
-
     std::string get_stats() const;
-
-    std::string get_status_line() const;
-
-    std::optional<sn_record_t>
-    find_node_by_x25519_bin(const sn_pub_key_t& address) const;
-
-    std::optional<sn_record_t>
-    find_node_by_ed25519_pk(const std::string& pk) const;
 };
 
-} // namespace loki
+} // namespace arqma

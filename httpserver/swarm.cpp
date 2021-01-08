@@ -1,16 +1,13 @@
 #include "swarm.h"
 #include "http_connection.h"
-#include "loki_logger.h"
+#include "arqma_logger.h"
 
 #include "service_node.h"
 
-#include <ostream>
 #include <stdlib.h>
 #include <unordered_map>
 
-#include "utils.hpp"
-
-namespace loki {
+namespace arqma {
 
 static bool swarm_exists(const all_swarms_t& all_swarms,
                          const swarm_id_t& swarm) {
@@ -22,33 +19,7 @@ static bool swarm_exists(const all_swarms_t& all_swarms,
     return it != all_swarms.end();
 }
 
-void debug_print(std::ostream& os, const block_update_t& bu) {
-
-    os << "Block update: {\n";
-    os << "     height: " << bu.height << '\n';
-    os << "     block hash: " << bu.block_hash << '\n';
-    os << "     hardfork: " << bu.hardfork << '\n';
-    os << "     swarms: [\n";
-
-    for (const SwarmInfo& swarm : bu.swarms) {
-        os << "         {\n";
-        os << "             id: " << swarm.swarm_id << '\n';
-        os << "         }\n";
-    }
-
-    os << "     ]\n";
-    os << "}\n";
-}
-
 Swarm::~Swarm() = default;
-
-bool Swarm::is_existing_swarm(swarm_id_t sid) const {
-
-    return std::any_of(all_valid_swarms_.begin(), all_valid_swarms_.end(),
-                       [sid](const SwarmInfo& cur_swarm_info) {
-                           return cur_swarm_info.swarm_id == sid;
-                       });
-}
 
 SwarmEvents Swarm::derive_swarm_events(const all_swarms_t& swarms) const {
 
@@ -82,7 +53,7 @@ SwarmEvents Swarm::derive_swarm_events(const all_swarms_t& swarms) const {
         // Got moved to a new swarm
         if (!swarm_exists(swarms, cur_swarm_id_)) {
             // Dissolved, new to push all our data to new swarms
-            events.dissolved = true;
+            events.decommissioned = true;
         }
 
         // If our old swarm is still alive, there is nothing for us to do
@@ -105,7 +76,11 @@ SwarmEvents Swarm::derive_swarm_events(const all_swarms_t& swarms) const {
 
     for (const auto& swarm_info : swarms) {
 
-        const bool found = this->is_existing_swarm(swarm_info.swarm_id);
+        const bool found = std::any_of(
+            all_cur_swarms_.begin(), all_cur_swarms_.end(),
+            [&swarm_info](const SwarmInfo& cur_swarm_info) {
+                return cur_swarm_info.swarm_id == swarm_info.swarm_id;
+            });
 
         if (!found) {
             events.new_swarms.push_back(swarm_info.swarm_id);
@@ -121,13 +96,13 @@ SwarmEvents Swarm::derive_swarm_events(const all_swarms_t& swarms) const {
 void Swarm::set_swarm_id(swarm_id_t sid) {
 
     if (sid == INVALID_SWARM_ID) {
-        LOKI_LOG(warn, "We are not currently an active Service Node");
+        ARQMA_LOG(warn, "We are not currently an active Service Node");
     } else {
 
         if (cur_swarm_id_ == INVALID_SWARM_ID) {
-            LOKI_LOG(info, "EVENT: started SN in swarm: {}", sid);
+            ARQMA_LOG(info, "EVENT: started SN in swarm: {}", sid);
         } else if (cur_swarm_id_ != sid) {
-            LOKI_LOG(info, "EVENT: got moved into a new swarm: {}", sid);
+            ARQMA_LOG(info, "EVENT: got moved into a new swarm: {}", sid);
         }
     }
 
@@ -151,8 +126,6 @@ static all_swarms_t apply_ips(const all_swarms_t& swarms_to_keep,
 
     all_swarms_t result_swarms = swarms_to_keep;
     const auto other_snode_map = get_snode_map_from_swarms(other_swarms);
-
-    int updates_count = 0;
     for (auto& swarm : result_swarms) {
         for (auto& snode : swarm.snodes) {
             const auto other_snode_it =
@@ -162,134 +135,54 @@ static all_swarms_t apply_ips(const all_swarms_t& swarms_to_keep,
                 // Keep swarms_to_keep but don't overwrite with default IPs
                 if (snode.ip() == "0.0.0.0") {
                     snode.set_ip(other_snode.ip());
-                    updates_count++;
                 }
             }
         }
     }
-
-    LOKI_LOG(debug, "Updated {} entries from lokid", updates_count);
     return result_swarms;
 }
 
 void Swarm::apply_swarm_changes(const all_swarms_t& new_swarms) {
 
-    LOKI_LOG(trace, "Applying swarm changes");
-
-    all_valid_swarms_ = apply_ips(new_swarms, all_valid_swarms_);
+    all_cur_swarms_ = apply_ips(new_swarms, all_cur_swarms_);
 }
 
 void Swarm::update_state(const all_swarms_t& swarms,
-                         const std::vector<sn_record_t>& decommissioned,
-                         const SwarmEvents& events, bool active) {
+                         const SwarmEvents& events) {
 
-    if (active) {
-
-        // The following only makes sense for active nodes in a swarm
-
-        if (events.dissolved) {
-            LOKI_LOG(info, "EVENT: our old swarm got DISSOLVED!");
-        }
-
-        for (const sn_record_t& sn : events.new_snodes) {
-            LOKI_LOG(info, "EVENT: detected new SN: {}", sn);
-        }
-
-        for (swarm_id_t swarm : events.new_swarms) {
-            LOKI_LOG(info, "EVENT: detected a new swarm: {}", swarm);
-        }
-
-        apply_swarm_changes(swarms);
-
-        const auto& members = events.our_swarm_members;
-
-        /// sanity check
-        if (members.empty())
-            return;
-
-        swarm_peers_.clear();
-        swarm_peers_.reserve(members.size() - 1);
-
-        std::copy_if(members.begin(), members.end(),
-                     std::back_inserter(swarm_peers_),
-                     [this](const sn_record_t& record) {
-                         return record != our_address_;
-                     });
+    if (events.decommissioned) {
+        ARQMA_LOG(info, "EVENT: our old swarm got DISSOLVED!");
     }
 
-    // Store a copy of every node in a separate data structure
-    all_funded_nodes_.clear();
-
-    for (const auto& si : swarms) {
-        for (const auto& sn : si.snodes) {
-            all_funded_nodes_.push_back(sn);
-        }
+    for (const sn_record_t& sn : events.new_snodes) {
+        ARQMA_LOG(info, "EVENT: detected new SN: {}", sn);
     }
 
-    for (const auto& sn : decommissioned) {
-        all_funded_nodes_.push_back(sn);
+    for (swarm_id_t swarm : events.new_swarms) {
+        ARQMA_LOG(info, "EVENT: detected a new swarm: {}", swarm);
     }
+
+    apply_swarm_changes(swarms);
+
+    const auto& members = events.our_swarm_members;
+
+    /// sanity check
+    if (members.empty())
+        return;
+
+    swarm_peers_.clear();
+    swarm_peers_.reserve(members.size() - 1);
+
+    std::copy_if(
+        members.begin(), members.end(), std::back_inserter(swarm_peers_),
+        [this](const sn_record_t& record) { return record != our_address_; });
 }
 
-std::optional<sn_record_t> Swarm::choose_funded_node() const {
+static uint64_t hex_to_u64(const std::string& pk) {
 
-    if (all_funded_nodes_.empty())
-        return std::nullopt;
-
-    const auto idx =
-        util::uniform_distribution_portable(all_funded_nodes_.size());
-
-    // Note: this can return our own node which should be fine
-    return all_funded_nodes_[idx];
-}
-
-std::optional<sn_record_t> Swarm::find_node_by_port(uint16_t port) const {
-
-    for (const auto& sn : all_funded_nodes_) {
-        if (sn.port() == port) {
-            return sn;
-        }
+    if (pk.size() != 66) {
+        throw std::invalid_argument("invalid pub key size");
     }
-
-    return std::nullopt;
-}
-
-std::optional<sn_record_t>
-Swarm::find_node_by_ed25519_pk(const std::string& pk) const {
-
-    for (const auto& sn : all_funded_nodes_) {
-        if (sn.pubkey_ed25519_hex() == pk) {
-            return sn;
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<sn_record_t>
-Swarm::find_node_by_x25519_bin(const std::string& pk) const {
-
-    for (const auto& sn : all_funded_nodes_) {
-        if (sn.pubkey_x25519_bin() == pk) {
-            return sn;
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<sn_record_t> Swarm::get_node_by_pk(const sn_pub_key_t& pk) const {
-
-    for (const auto& sn : all_funded_nodes_) {
-        if (sn.pub_key_base32z() == pk) {
-            return sn;
-        }
-    }
-
-    return std::nullopt;
-}
-
-static uint64_t hex_to_u64(const user_pubkey_t& pk) {
 
     /// Create a buffer for 16 characters null terminated
     char buf[17] = {};
@@ -301,7 +194,7 @@ static uint64_t hex_to_u64(const user_pubkey_t& pk) {
     /// get a value in res (possibly 0 or UINT64_MAX), which
     /// we are not handling at the moment
     uint64_t res = 0;
-    for (auto it = pk.str().begin() + 2; it < pk.str().end(); it += 16) {
+    for (auto it = pk.begin() + 2; it < pk.end(); it += 16) {
         memcpy(buf, &(*it), 16);
         res ^= strtoull(buf, nullptr, 16);
     }
@@ -309,43 +202,28 @@ static uint64_t hex_to_u64(const user_pubkey_t& pk) {
     return res;
 }
 
-bool Swarm::is_pubkey_for_us(const user_pubkey_t& pk) const {
-
-    /// TODO: Make sure no exceptions bubble up from here!
-    return cur_swarm_id_ == get_swarm_by_pk(all_valid_swarms_, pk);
-}
-
-bool Swarm::is_fully_funded_node(const std::string& sn_address) const {
-
-    return std::any_of(all_funded_nodes_.begin(), all_funded_nodes_.end(),
-                       [&sn_address](const sn_record_t& sn) {
-                           return sn.sn_address() == sn_address;
-                       });
+bool Swarm::is_pubkey_for_us(const std::string& pk) const {
+    return cur_swarm_id_ == get_swarm_by_pk(all_cur_swarms_, pk);
 }
 
 swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms,
-                           const user_pubkey_t& pk) {
+                           const std::string& pk) {
 
     const uint64_t res = hex_to_u64(pk);
 
     /// We reserve UINT64_MAX as a sentinel swarm id for unassigned snodes
-    constexpr swarm_id_t MAX_ID = INVALID_SWARM_ID - 1;
+    constexpr swarm_id_t MAX_ID = std::numeric_limits<uint64_t>::max() - 1;
+    constexpr swarm_id_t SENTINEL_ID = std::numeric_limits<uint64_t>::max();
 
-    swarm_id_t cur_best = INVALID_SWARM_ID;
-    uint64_t cur_min = INVALID_SWARM_ID;
+    swarm_id_t cur_best = SENTINEL_ID;
+    uint64_t cur_min = SENTINEL_ID;
 
     /// We don't require that all_swarms is sorted, so we find
     /// the smallest/largest elements in the same loop
-    swarm_id_t leftmost_id = INVALID_SWARM_ID;
+    swarm_id_t leftmost_id = SENTINEL_ID;
     swarm_id_t rightmost_id = 0;
 
     for (const auto& si : all_swarms) {
-
-        if (si.swarm_id == INVALID_SWARM_ID) {
-            /// Just to be sure we check again that no decomissioned
-            /// node is exposed to clients
-            continue;
-        }
 
         uint64_t dist =
             (si.swarm_id > res) ? (si.swarm_id - res) : (res - si.swarm_id);
@@ -387,4 +265,4 @@ const std::vector<sn_record_t>& Swarm::other_nodes() const {
     return swarm_peers_;
 }
 
-} // namespace loki
+} // namespace arqma

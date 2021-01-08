@@ -2,10 +2,11 @@
 #include "utils.hpp"
 
 extern "C" {
-#include "loki/crypto-ops/crypto-ops.h"
-#include "loki/crypto-ops/hash-ops.h"
+#include "arqma/crypto-ops/crypto-ops.h"
+#include "arqma/crypto-ops/hash-ops.h"
 }
 
+#include <boost/beast/core/detail/base64.hpp>
 #include <sodium/crypto_generichash.h>
 #include <sodium/crypto_generichash_blake2b.h>
 #include <sodium/randombytes.h>
@@ -17,9 +18,9 @@ extern "C" {
 #include <iterator>
 #include <string>
 
-static_assert(crypto_generichash_BYTES == loki::HASH_SIZE, "Wrong hash size!");
+static_assert(crypto_generichash_BYTES == arqma::HASH_SIZE, "Wrong hash size!");
 
-namespace loki {
+namespace arqma {
 
 using ec_point = std::array<uint8_t, 32>;
 struct s_comm {
@@ -53,7 +54,7 @@ hash hash_data(const std::string& data) {
 }
 
 signature generate_signature(const hash& prefix_hash,
-                             const lokid_key_pair_t& key_pair) {
+                             const arqmad_key_pair_t& key_pair) {
     ge_p3 tmp3;
     ec_scalar k;
     s_comm buf;
@@ -118,7 +119,8 @@ bool check_signature(const signature& sig, const hash& prefix_hash,
 bool check_signature(const std::string& signature, const hash& hash,
                      const std::string& public_key_b32z) {
     // convert signature
-    const std::string raw_signature = util::base64_decode(signature);
+    const std::string raw_signature =
+        boost::beast::detail::base64_decode(signature);
     struct signature sig;
     std::copy_n(raw_signature.begin(), sig.c.size(), sig.c.begin());
     std::copy_n(raw_signature.begin() + sig.c.size(), sig.r.size(),
@@ -132,4 +134,4 @@ bool check_signature(const std::string& signature, const hash& hash,
     return check_signature(sig, hash, public_key);
 }
 
-} // namespace loki
+} // namespace arqma
