@@ -16,6 +16,6 @@ jobs:
     - name: install dependencies
       run: sudo apt -y install build-essential cmake graphviz doxygen pkg-config libssl-dev libsodium-dev
     - name: build
-      run: cmake -DDISABLE_SNODE_SIGNATURE=OFF -DCMAKE_BUILD_TYPE=Release ..
+      run: cmake -S . -B build -DBoost_INCLUDE_DIR=$BOOST_ROOT_1_66_0/include -DDISABLE_SNODE_SIGNATURE=OFF -DCMAKE_BUILD_TYPE=Release ..
     - name: build cmake
-      run: cmake -S . -B build -DBoost_INCLUDE_DIR=$BOOST_ROOT_1_72_0/include --build .
+      run: cmake --build .
