@@ -12,7 +12,9 @@ jobs:
     steps:
     - uses: actions/checkout@v1
       with:
-        submodules: recursive  
+        submodules: recursive
+      env:
+        BOOST_ROOT: /usr/local/share/boost/1.72.0
     - name: install dependencies
       run: sudo apt -y install build-essential cmake libboost-all-dev graphviz doxygen pkg-config libssl-dev libsodium-dev
     - name: build
