@@ -13,9 +13,9 @@ jobs:
     - uses: actions/checkout@v1
       with:
         submodules: recursive
-    - run: |
-       echo "::set-env name=BOOST_ROOT::$BOOST_ROOT_1_72_0"  
     - name: install dependencies
       run: sudo apt -y install build-essential cmake graphviz doxygen pkg-config libssl-dev libsodium-dev
     - name: build
-      run: make -j2
+      run: cmake -S . -B build -DBoost_INCLUDE_DIR=$BOOST_ROOT_1_72_0/include -DDISABLE_SNODE_SIGNATURE=OFF -DCMAKE_BUILD_TYPE=Release ..
+    - name: build cmake
+      run: cmake --build .
