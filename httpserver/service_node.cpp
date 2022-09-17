@@ -18,9 +18,6 @@
 #include <chrono>
 #include <fstream>
 
-#include <boost/beast/core/detail/base64.hpp>
-#include <boost/bind.hpp>
-
 using json = nlohmann::json;
 using arqma::storage::Item;
 using namespace std::chrono_literals;
@@ -782,7 +779,7 @@ void ServiceNode::attach_signature(std::shared_ptr<request_t>& request,
     raw_sig.insert(raw_sig.begin(), sig.c.begin(), sig.c.end());
     raw_sig.insert(raw_sig.end(), sig.r.begin(), sig.r.end());
 
-    const std::string sig_b64 = boost::beast::detail::base64_encode(raw_sig);
+    const std::string sig_b64 = util::base64_encode(raw_sig);
     request->set(ARQMA_SNODE_SIGNATURE_HEADER, sig_b64);
 
     attach_pubkey(request);

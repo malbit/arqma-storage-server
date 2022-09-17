@@ -22,8 +22,6 @@
 #include <string>
 #include <thread>
 
-#include <boost/beast/core/detail/base64.hpp>
-
 using json = nlohmann::json;
 using namespace std::chrono_literals;
 
@@ -616,7 +614,7 @@ void connection_t::write_response() {
     response_.body() = body_stream_.str();
 #endif
 
-    response_.set(http::field::content_length, response_.body().size());
+    response_.set(http::field::content_length, std::to_string(response_.body().size()));
 
     /// This attempts to write all data to a stream
     /// TODO: handle the case when we are trying to send too much
