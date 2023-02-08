@@ -11,7 +11,7 @@ find_package(Boost REQUIRED filesystem)
 
 add_library(utils STATIC ${SOURCES})
 
-set_property(TARGET utils PROPERTY CXX_STANDARD 14)
+set_property(TARGET utils PROPERTY CXX_STANDARD 17)
 
 target_include_directories(utils
     PUBLIC

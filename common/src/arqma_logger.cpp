@@ -66,8 +66,8 @@ void init_logging(const std::string& data_dir,
     std::vector<spdlog::sink_ptr> sinks = {console_sink, file_sink,
                                            developer_sink};
 
-    auto logger = std::make_shared<spdlog::logger>("arqma_logger", sinks.begin(),
-                                                   sinks.end());
+    auto logger = std::make_shared<spdlog::logger>("arqma_logger",
+                                                   sinks.begin(), sinks.end());
     logger->set_level(log_level);
     logger->flush_on(spdlog::level::err);
 
@@ -78,8 +78,8 @@ void init_logging(const std::string& data_dir,
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
 
     ARQMA_LOG(info,
-             "\n**************************************************************"
-             "\nOutputting logs to {}",
-             log_location);
+              "\n**************************************************************"
+              "\nOutputting logs to {}",
+              log_location);
 }
 } // namespace arqma

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 
 add_definitions(-DSPDLOG_COMPILED_LIB)
 
@@ -14,12 +14,9 @@ set(HEADER_FILES
 
 add_library(common STATIC ${HEADER_FILES} ${SRC_FILES})
 
-find_package(Boost
-    REQUIRED
-    filesystem
-)
+find_package(Boost REQUIRED filesystem)
 
-set_property(TARGET common PROPERTY CXX_STANDARD 14)
+set_property(TARGET common PROPERTY CXX_STANDARD 17)
 
 arqma_add_subdirectory(../vendors/spdlog spdlog)
 

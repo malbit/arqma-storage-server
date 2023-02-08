@@ -7,7 +7,7 @@ add_library(pow STATIC ${SOURCES})
 
 arqma_add_subdirectory(../utils utils)
 
-set_property(TARGET pow PROPERTY CXX_STANDARD 14)
+set_property(TARGET pow PROPERTY CXX_STANDARD 17)
 
 find_package(OpenSSL REQUIRED)
 target_link_libraries(pow PRIVATE OpenSSL::SSL)

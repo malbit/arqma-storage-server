@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <array>
 
 namespace util {
 
@@ -109,9 +110,36 @@ bool base32z_decode(const Stack& stack, V& value) {
     return true;
 }
 
-std::string hex64_to_base32z(const std::string& src);
+std::string hex_to_base32z(const std::string& src);
 
-uint64_t uniform_distribution_portable(std::mt19937_64& mersenne_twister,
-                                       uint64_t n);
+std::string hex_to_bytes(const std::string &hex);
+
+template <typename It>
+std::string as_hex(It begin, It end) {
+  constexpr std::array<char, 16> lut{{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}};
+  std::string hex;
+  using std::distance;
+  hex.reserve(distance(begin, end) * 2);
+  while (begin != end) {
+    char c = *begin;
+    hex += lut[(c & 0xf0) >> 4];
+    hex += lut[c & 0x0f];
+    ++begin;
+  }
+  return hex;
+}
+
+template <typename String>
+inline std::string as_hex(const String &s) {
+  using std::begin;
+  using std::end;
+  return as_hex(begin(s), end(s));
+}
+
+uint64_t uniform_distribution_portable(uint64_t n);
+
+uint64_t uniform_distribution_portable(std::mt19937_64& mersenne_twister, uint64_t n);
+
+int get_fd_limit();
 
 } // namespace util

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 
 add_definitions(-DDISABLE_ENCRYPTION)
 
@@ -18,6 +18,7 @@ set(HEADER_FILES
     command_line.h
     net_stats.h
     dns_text_records.h
+    reachability_testing.h
     )
 
 set(SRC_FILES
@@ -32,6 +33,7 @@ set(SRC_FILES
     security.cpp
     command_line.cpp
     dns_text_records.cpp
+    reachability_testing.cpp
     )
 
 add_library(httpserver_lib STATIC ${HEADER_FILES} ${SRC_FILES})
@@ -59,7 +61,7 @@ target_link_libraries(httpserver_lib PUBLIC pow)
 target_link_libraries(httpserver_lib PUBLIC resolv)
 target_link_libraries(httpserver_lib PUBLIC crypto)
 
-set_property(TARGET httpserver_lib PROPERTY CXX_STANDARD 14)
+set_property(TARGET httpserver_lib PROPERTY CXX_STANDARD 17)
 
 target_include_directories(httpserver_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${Boost_INCLUDE_DIRS})
 target_link_libraries(httpserver_lib PUBLIC ${Boost_LIBRARIES})

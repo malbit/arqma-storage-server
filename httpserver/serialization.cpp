@@ -132,8 +132,6 @@ std::vector<message_t> deserialize_messages(const std::string& blob) {
 
     ARQMA_LOG(trace, "=== Deserializing ===");
 
-    constexpr size_t PK_SIZE = 66; // characters in hex;
-
     std::vector<message_t> result;
 
     string_view slice{blob};
@@ -141,7 +139,7 @@ std::vector<message_t> deserialize_messages(const std::string& blob) {
     while (!slice.empty()) {
 
         /// Deserialize PK
-        auto pk = deserialize_string(slice, PK_SIZE);
+        auto pk = deserialize_string(slice, arqma::get_user_pubkey_size());
         if (!pk) {
             ARQMA_LOG(debug, "Could not deserialize pk");
             return {};

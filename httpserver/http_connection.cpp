@@ -3,6 +3,7 @@
 #include "Item.hpp"
 #include "channel_encryption.hpp"
 #include "dev_sink.h"
+#include "net_stats.h"
 #include "rate_limiter.h"
 #include "security.h"
 #include "serialization.h"
@@ -10,7 +11,6 @@
 #include "service_node.h"
 #include "signature.h"
 #include "utils.hpp"
-#include "net_stats.h"
 
 #include <cstdlib>
 #include <ctime>
@@ -27,6 +27,7 @@ using namespace std::chrono_literals;
 
 using tcp = boost::asio::ip::tcp;    // from <boost/asio.hpp>
 namespace http = boost::beast::http; // from <boost/beast/http.hpp>
+namespace sp = std::placeholders; // for std::placeholders:: code shorten
 
 /// +===========================================
 
@@ -65,9 +66,9 @@ void make_http_request(boost::asio::io_context& ioc,
 #endif
     if (ec) {
         ARQMA_LOG(error,
-                 "http: Failed to parse the IP address <{}>. Error code = {}. "
-                 "Message: {}",
-                 sn_address, ec.value(), ec.message());
+                  "http: Failed to parse the IP address <{}>. Error code = {}. "
+                  "Message: {}",
+                  sn_address, ec.value(), ec.message());
         return;
     }
     while (destination != tcp::resolver::iterator()) {
@@ -84,35 +85,18 @@ void make_http_request(boost::asio::io_context& ioc,
 
     session->start();
 }
-
-static std::string arr32_to_hex(const std::array<uint8_t, 32>& arr) {
-
-    constexpr size_t res_len = 32 * 2 + 1;
-
-    char hex[res_len];
-
-    sodium_bin2hex(hex, res_len, arr.data(), 32);
-
-    return std::string(hex);
-}
 // ======================== Arqmad Client ========================
-ArqmadClient::ArqmadClient(boost::asio::io_context& ioc, uint16_t port)
-    : ioc_(ioc), arqmad_rpc_port_(port) {}
+ArqmadClient::ArqmadClient(boost::asio::io_context& ioc, std::string ip, uint16_t port)
+    : ioc_(ioc), arqmad_rpc_ip_(std::move(ip)), arqmad_rpc_port_(port) {}
 
-void ArqmadClient::make_arqmad_request(boost::string_view method,
-                                     const nlohmann::json& params,
-                                     http_callback_t&& cb) const {
-
-    make_arqmad_request(local_ip_, arqmad_rpc_port_, method, params,
-                       std::move(cb));
+void ArqmadClient::make_arqmad_request(boost::string_view method, const nlohmann::json& params, http_callback_t&& cb) const
+{
+  make_custom_arqmad_request(arqmad_rpc_ip_, arqmad_rpc_port_, method, params, std::move(cb));
 }
 
-void ArqmadClient::make_arqmad_request(const std::string& daemon_ip,
-                                     const uint16_t daemon_port,
-                                     boost::string_view method,
-                                     const nlohmann::json& params,
-                                     http_callback_t&& cb) const {
-
+void ArqmadClient::make_custom_arqmad_request(const std::string& daemon_ip, const uint16_t daemon_port, boost::string_view method,
+                                              const nlohmann::json& params, http_callback_t&& cb) const
+{
     auto req = std::make_shared<request_t>();
 
     const std::string target = "/json_rpc";
@@ -132,34 +116,92 @@ void ArqmadClient::make_arqmad_request(const std::string& daemon_ip,
 
     make_http_request(ioc_, daemon_ip, daemon_port, req, std::move(cb));
 }
-// =============================================================
 
+static bool validateHexKey(const std::string& key, const size_t key_length = arqma::KEY_LENGTH) {
+  return key.size() == 2 * key_length &&
+         std::all_of(key.begin(), key.end(), [](char c) {
+           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+         });
+}
+
+std::tuple<private_key_t, private_key_ed25519_t, private_key_t>
+ArqmadClient::wait_for_privkey()
+{
+  // fetch Service-Node private key from Arqmad. Do this synchronously
+  // because we can't finish startup until we have it.
+  arqma::private_key_t private_key;
+  arqma::private_key_ed25519_t private_key_ed;
+  arqma::private_key_t private_key_x;
+  ARQMA_LOG(info, "Retrieving Service-Node key from Arqmad");
+  boost::asio::steady_timer delay{ioc_};
+  std::function<void(arqma::sn_response_t &&res)> key_fetch;
+  key_fetch = [&](arqma::sn_response_t res) {
+    try {
+      if (res.error_code != arqma::SNodeError::NO_ERROR)
+        throw std::runtime_error(arqma::error_string(res.error_code));
+      else if (!res.body)
+        throw std::runtime_error("empty body");
+      else {
+        auto r = nlohmann::json::parse(*res.body);
+        const auto &legacy_privkey = r.at("result").at("service_node_privkey").get_ref<const std::string &>();
+        const auto &privkey_ed = r.at("result").at("service_node_ed25519_privkey").get_ref<const std::string &>();
+        const auto &privkey_x = r.at("result").at("service_node_x25519_privkey").get_ref<const std::string &>();
+        if (!validateHexKey(legacy_privkey) || !validateHexKey(privkey_ed, private_key_ed25519_t::LENGTH) || !validateHexKey(privkey_x))
+          throw std::runtime_error("returned value is not Hex");
+        else {
+          private_key = arqma::arqmadKeyFromHex(legacy_privkey);
+          private_key_ed = private_key_ed25519_t::from_hex(privkey_ed);
+          private_key_x = arqma::arqmadKeyFromHex(privkey_x);
+        }
+      }
+    } catch (const std::exception &e) {
+      ARQMA_LOG(critical, "Error retrieving Service-Node private key from arqmad @ {}:{}: {}. Is arqmad running? Retrying in 5s",
+                arqmad_rpc_ip_, arqmad_rpc_port_, e.what());
+
+      delay.expires_after(std::chrono::seconds{5});
+      delay.async_wait([this, &key_fetch](const boost::system::error_code &) {
+        make_arqmad_request("get_service_node_privkey", {}, key_fetch); });
+    }
+  };
+  make_arqmad_request("get_service_node_privkey", {}, key_fetch);
+  ioc_.run();
+  ioc_.restart();
+
+  return std::tuple<private_key_t, private_key_ed25519_t, private_key_t>{private_key, private_key_ed, private_key_x};
+}
+// =============================================================
 namespace http_server {
 
 // "Loop" forever accepting new connections.
-static void
-accept_connection(boost::asio::io_context& ioc,
-                  boost::asio::ssl::context& ssl_ctx, tcp::acceptor& acceptor,
-                  ServiceNode& sn,
-                  ChannelEncryption<std::string>& channel_encryption,
-                  RateLimiter& rate_limiter, const Security& security) {
+static void accept_connection(boost::asio::io_context& ioc, boost::asio::ssl::context& ssl_ctx, tcp::acceptor& acceptor, ServiceNode& sn,
+                              ChannelEncryption<std::string>& channel_encryption, RateLimiter& rate_limiter, const Security& security)
+{
+  static boost::asio::steady_timer acceptor_timer(ioc);
+  constexpr std::chrono::milliseconds ACCEPT_DELAY = 50ms;
 
-    acceptor.async_accept([&](const error_code& ec, tcp::socket socket) {
-        ARQMA_LOG(trace, "connection accepted");
-        if (!ec)
-            std::make_shared<connection_t>(ioc, ssl_ctx, std::move(socket), sn,
-                                           channel_encryption, rate_limiter,
-                                           security)
-                ->start();
+  acceptor.async_accept([&](const error_code& ec, tcp::socket socket) {
+    ARQMA_LOG(trace, "connection accepted");
+    if (!ec) {
+      std::make_shared<connection_t>(ioc, ssl_ctx, std::move(socket), sn, channel_encryption, rate_limiter, security)->start();
+      accept_connection(ioc, ssl_ctx, acceptor, sn, channel_encryption, rate_limiter, security);
+    } else {
+      if (ec == boost::system::errc::too_many_files_open) {
+        ARQMA_LOG(critical, "Too many open files, aborting");
+        abort();
+      }
+      ARQMA_LOG(error, "Could not accept a new connection {}: {}. Will only start accepting new connections after a short delay.",
+                ec.value(), ec.message());
 
-        if (ec) {
-            ARQMA_LOG(error, "Could not accept a new connection {}: {}",
-                     ec.value(), ec.message());
+      acceptor_timer.expires_after(ACCEPT_DELAY);
+      acceptor_timer.async_wait([&](const error_code& ec) {
+        if (ec && ec != boost::asio::error::operation_aborted) {
+          abort();
         }
 
-        accept_connection(ioc, ssl_ctx, acceptor, sn, channel_encryption,
-                          rate_limiter, security);
-    });
+        accept_connection(ioc, ssl_ctx, acceptor, sn, channel_encryption, rate_limiter, security);
+      });
+    }
+  });
 }
 
 void run(boost::asio::io_context& ioc, const std::string& ip, uint16_t port,
@@ -211,13 +253,10 @@ connection_t::connection_t(boost::asio::io_context& ioc, ssl::context& ssl_ctx,
 
 connection_t::~connection_t() {
 
-    // TODO: should check if we are still registered for
-    // notifications, and deregister if so.
-
     // Safety net
     if (stream_.lowest_layer().is_open()) {
         ARQMA_LOG(debug, "Client socket should be closed by this point, but "
-                        "wasn't. Closing now.");
+                         "wasn't. Closing now.");
         stream_.lowest_layer().close();
     }
 
@@ -236,24 +275,38 @@ void connection_t::do_handshake() {
     stream_.async_handshake(ssl::stream_base::server,
                             std::bind(&connection_t::on_handshake,
                                       shared_from_this(),
-                                      std::placeholders::_1));
+                                      sp::_1));
 }
 
-void connection_t::on_handshake(boost::system::error_code ec) {
-    if (ec) {
-        ARQMA_LOG(warn, "ssl handshake failed: {}", ec.message());
-        deadline_.cancel();
-        return;
-    }
+void connection_t::on_handshake(boost::system::error_code ec)
+{
+  const auto sockfd = stream_.lowest_layer().native_handle();
+  ARQMA_LOG(debug, "Open https socket: {}", sockfd);
+  get_net_stats().record_socket_open(sockfd);
+  if (ec) {
+    ARQMA_LOG(warn, "ssl handshake failed: ec: {} ({})", ec.value(), ec.message());
+    this->clean_up();
+    deadline_.cancel();
+    return;
+  }
 
-    read_request();
+  read_request();
+}
+
+void connection_t::clean_up()
+{
+  this->do_close();
+
+  if (this->notification_ctx_) {
+    this->service_node_.remove_listener(this->notification_ctx_->pubkey, this);
+  }
 }
 
 void connection_t::notify(boost::optional<const message_t&> msg) {
 
     if (!notification_ctx_) {
         ARQMA_LOG(error,
-                 "Trying to notify a connection without notification context");
+                  "Trying to notify a connection without notification context");
         return;
     }
 
@@ -278,6 +331,7 @@ void connection_t::read_request() {
                 error,
                 "Failed to read from a socket [{}: {}], connection idx: {}",
                 ec.value(), ec.message(), self->conn_idx);
+            self->clean_up();
             self->deadline_.cancel();
             return;
         }
@@ -287,7 +341,7 @@ void connection_t::read_request() {
             self->process_request();
         } catch (const std::exception& e) {
             ARQMA_LOG(critical, "Exception caught processing a request: {}",
-                     e.what());
+                      e.what());
             self->body_stream_ << e.what();
         }
 
@@ -302,7 +356,8 @@ void connection_t::read_request() {
 bool connection_t::validate_snode_request() {
     if (!parse_header(ARQMA_SENDER_SNODE_PUBKEY_HEADER,
                       ARQMA_SNODE_SIGNATURE_HEADER)) {
-        ARQMA_LOG(debug, "Missing signature headers for a Service Node request");
+        ARQMA_LOG(debug,
+                  "Missing signature headers for a Service Node request");
         return false;
     }
     const auto& signature = header_[ARQMA_SNODE_SIGNATURE_HEADER];
@@ -313,7 +368,7 @@ bool connection_t::validate_snode_request() {
     if (!service_node_.is_snode_address_known(snode_address)) {
         body_stream_ << "Unknown service node\n";
         ARQMA_LOG(debug, "Discarding signature from unknown service node: {}",
-                 public_key_b32z);
+                  public_key_b32z);
         response_.result(http::status::unauthorized);
         return false;
     }
@@ -340,7 +395,7 @@ bool connection_t::verify_signature(const std::string& signature,
 }
 
 void connection_t::process_storage_test_req(uint64_t height,
-                                            const std::string& tester_addr,
+                                            const std::string& tester_pk,
                                             const std::string& msg_hash) {
 
     ARQMA_LOG(trace, "Performing storage test, attempt: {}", repetition_count_);
@@ -348,7 +403,7 @@ void connection_t::process_storage_test_req(uint64_t height,
     std::string answer;
 
     const MessageTestStatus status = service_node_.process_storage_test_req(
-        height, tester_addr, msg_hash, answer);
+        height, tester_pk, msg_hash, answer);
     const auto elapsed_time =
         std::chrono::steady_clock::now() - start_timestamp_;
     if (status == MessageTestStatus::SUCCESS) {
@@ -358,7 +413,13 @@ void connection_t::process_storage_test_req(uint64_t height,
             std::chrono::duration_cast<std::chrono::milliseconds>(elapsed_time)
                 .count());
         delay_response_ = true;
-        body_stream_ << answer;
+
+        nlohmann::json json_res;
+        json_res["status"] = "OK";
+        json_res["value"] = answer;
+
+        this->body_stream_ << json_res.dump();
+
         response_.result(http::status::ok);
         this->write_response();
     } else if (status == MessageTestStatus::RETRY && elapsed_time < 1min) {
@@ -367,33 +428,56 @@ void connection_t::process_storage_test_req(uint64_t height,
 
         repeat_timer_.expires_after(TEST_RETRY_PERIOD);
         repeat_timer_.async_wait([self = shared_from_this(), height, msg_hash,
-                                  tester_addr](const error_code& ec) {
+                                  tester_pk](const error_code& ec) {
             if (ec) {
                 if (ec != boost::asio::error::operation_aborted) {
                     ARQMA_LOG(error,
-                             "Repeat timer failed for storage test [{}: {}]",
-                             ec.value(), ec.message());
+                              "Repeat timer failed for storage test [{}: {}]",
+                              ec.value(), ec.message());
                 }
             } else {
-                self->process_storage_test_req(height, tester_addr, msg_hash);
+                self->process_storage_test_req(height, tester_pk, msg_hash);
             }
         });
 
+    } else if (status == MessageTestStatus::WRONG_REQ) {
+        nlohmann::json json_res;
+        json_res["status"] = "wrong request";
+        this->body_stream_ << json_res.dump();
+        response_.result(http::status::ok);
     } else {
         ARQMA_LOG(error, "Failed storage test, tried {} times.",
-                 repetition_count_);
-        response_.result(http::status::bad_request);
-        /// TODO: send a helpful error message
+                  repetition_count_);
+        nlohmann::json json_res;
+        json_res["status"] = "other";
+        this->body_stream_ << json_res.dump();
+        response_.result(http::status::ok);
     }
+}
+
+void connection_t::process_blockchain_test_req(uint64_t,
+                                               const std::string& tester_pk,
+                                               bc_test_params_t params) {
+    ARQMA_LOG(debug, "Performing blockchain test");
+
+    auto callback = [this](blockchain_test_answer_t answer) {
+        this->response_.result(http::status::ok);
+
+        nlohmann::json json_res;
+        json_res["res_height"] = answer.res_height;
+
+        this->body_stream_ << json_res.dump();
+        this->write_response();
+    };
+
+    service_node_.perform_blockchain_test(params, std::move(callback));
 }
 
 void connection_t::process_swarm_req(boost::string_view target) {
 
-#ifndef DISABLE_SNODE_SIGNATURE
-    if (!validate_snode_request()) {
+    if (!validate_snode_request() && (target != "/swarms/ping_test/v1")) {
         return;
     }
-#endif
 
     response_.set(ARQMA_SNODE_SIGNATURE_HEADER, security_.get_cert_signature());
 
@@ -403,6 +487,7 @@ void connection_t::process_swarm_req(boost::string_view target) {
         service_node_.process_push_batch(request_.body());
 
     } else if (target == "/swarms/storage_test/v1") {
+        response_.result(http::status::bad_request);
         ARQMA_LOG(debug, "Got storage test request");
 
         using nlohmann::json;
@@ -423,7 +508,8 @@ void connection_t::process_swarm_req(boost::string_view target) {
             blk_height = body.at("height").get<uint64_t>();
             msg_hash = body.at("hash").get<std::string>();
         } catch (...) {
-            this->body_stream_ << "Bad snode test request: missing fields in json";
+            this->body_stream_
+                << "Bad snode test request: missing fields in json";
             response_.result(http::status::bad_request);
             ARQMA_LOG(debug, "Bad snode test request: missing fields in json");
             return;
@@ -431,8 +517,7 @@ void connection_t::process_swarm_req(boost::string_view target) {
 
         const auto it = header_.find(ARQMA_SENDER_SNODE_PUBKEY_HEADER);
         if (it != header_.end()) {
-            std::string& tester_pk = it->second;
-            tester_pk.append(".snode");
+            const std::string& tester_pk = it->second;
             this->process_storage_test_req(blk_height, tester_pk, msg_hash);
         } else {
             ARQMA_LOG(debug, "Ignoring test request, no pubkey present");
@@ -452,28 +537,35 @@ void connection_t::process_swarm_req(boost::string_view target) {
 
         bc_test_params_t params;
 
+        uint64_t height = 0;
+
         try {
             params.max_height = body.at("max_height").get<uint64_t>();
             params.seed = body.at("seed").get<uint64_t>();
+
+            if (body.find("height") != body.end()) {
+                height = body.at("height").get<uint64_t>();
+            } else {
+                ARQMA_LOG(debug, "No tester height, defaulting to {}", height);
+            }
         } catch (...) {
             response_.result(http::status::bad_request);
             ARQMA_LOG(debug, "Bad snode test request: missing fields in json");
             return;
         }
 
-        delay_response_ = true;
+        const auto it = header_.find(ARQMA_SENDER_SNODE_PUBKEY_HEADER);
+        if (it != header_.end()) {
+            const std::string& tester_pk = it->second;
+            delay_response_ = true;
+            this->process_blockchain_test_req(height, tester_pk, params);
+        } else {
+            ARQMA_LOG(debug, "Ignoring test request, no pubkey present");
+        }
 
-        auto callback = [this](blockchain_test_answer_t answer) {
-            this->response_.result(http::status::ok);
-
-            nlohmann::json json_res;
-            json_res["res_height"] = answer.res_height;
-
-            this->body_stream_ << json_res.dump();
-            this->write_response();
-        };
-
-        service_node_.perform_blockchain_test(params, callback);
+    } else if (target == "/swarms/ping_test/v1") {
+        ARQMA_LOG(debug, "Received ping_test");
+        response_.result(http::status::ok);
     } else if (target == "/swarms/push/v1") {
 
         ARQMA_LOG(trace, "swarms/push");
@@ -506,10 +598,15 @@ void connection_t::process_request() {
     switch (request_.method()) {
     case http::verb::post: {
         std::string reason;
+
+        if (target == "/swarms/ping_test/v1") {
+          this->process_swarm_req(target);
+          break;
+        }
         if (!service_node_.snode_ready(reason)) {
             ARQMA_LOG(debug,
-                     "Ignoring post request; storage server not ready: {}",
-                     reason);
+                      "Ignoring post request; storage server not ready: {}",
+                      reason);
             response_.result(http::status::service_unavailable);
             body_stream_ << fmt::format("Service node is not ready: {}\n",
                                         reason);
@@ -522,9 +619,14 @@ void connection_t::process_request() {
             try {
                 process_client_req();
             } catch (std::exception& e) {
-                this->body_stream_ << fmt::format("Exception caught while processing client request: {}", e.what());
+                this->body_stream_ << fmt::format(
+                    "Exception caught while processing client request: {}",
+                    e.what());
                 response_.result(http::status::internal_server_error);
-                ARQMA_LOG(critical, "Exception caught while processing client request: {}", e.what());
+                ARQMA_LOG(
+                    critical,
+                    "Exception caught while processing client request: {}",
+                    e.what());
             }
 
             // TODO: parse target (once) to determine if it is a "swarms" call
@@ -551,11 +653,18 @@ void connection_t::process_request() {
             response_.result(http::status::ok);
             write_response();
             ioc_.stop();
+        } else if (target == "/sleep") {
+            ioc_.post([]() {
+              ARQMA_LOG(warn, "Sleeping for some time...");
+              std::this_thread::sleep_for(std::chrono::seconds(30));
+            });
+            response_.result(http::status::ok);
         }
 #endif
         else {
             ARQMA_LOG(debug, "unknown target for POST: {}", target.to_string());
-            this->body_stream_ << fmt::format("unknown target for POST: {}", target.to_string());
+            this->body_stream_ << fmt::format("unknown target for POST: {}",
+                                              target.to_string());
             response_.result(http::status::not_found);
         }
         break;
@@ -567,7 +676,8 @@ void connection_t::process_request() {
         } else if (target == "/get_logs/v1") {
             this->on_get_logs();
         } else {
-            this->body_stream_ << fmt::format("unknown target for GET: {}", target.to_string());
+            this->body_stream_ << fmt::format("unknown target for GET: {}",
+                                              target.to_string());
             ARQMA_LOG(debug, "unknown target for GET: {}", target.to_string());
             response_.result(http::status::not_found);
         }
@@ -605,16 +715,18 @@ void connection_t::write_response() {
             body_stream_ << "Could not encrypt/encode response: ";
             body_stream_ << e.what() << "\n";
             response_.body() = body_stream_.str();
-            ARQMA_LOG(critical,
-                     "Internal Server Error. Could not encrypt response for {}",
-                     obfuscate_pubkey(ephemKey));
+            ARQMA_LOG(
+                critical,
+                "Internal Server Error. Could not encrypt response for {}",
+                obfuscate_pubkey(ephemKey));
         }
     }
 #else
     response_.body() = body_stream_.str();
 #endif
 
-    response_.set(http::field::content_length, std::to_string(response_.body().size()));
+    response_.set(http::field::content_length,
+                  std::to_string(response_.body().size()));
 
     /// This attempts to write all data to a stream
     /// TODO: handle the case when we are trying to send too much
@@ -622,10 +734,10 @@ void connection_t::write_response() {
         stream_, response_, [self = shared_from_this()](error_code ec, size_t) {
             if (ec && ec != boost::asio::error::operation_aborted) {
                 ARQMA_LOG(error, "Failed to write to a socket: {}",
-                         ec.message());
+                          ec.message());
             }
 
-            self->do_close();
+            self->clean_up();
             /// Is it too early to cancel the deadline here?
             self->deadline_.cancel();
         });
@@ -654,6 +766,8 @@ json snodes_to_json(const std::vector<sn_record_t>& snodes) {
     for (const auto& sn : snodes) {
         json snode;
         snode["address"] = sn.sn_address();
+        snode["pubkey_x25519"] = sn.pubkey_x25519_hex();
+        snode["pubkey_ed25519"] = sn.pubkey_ed25519_hex();
         snode["port"] = std::to_string(sn.port());
         snode["ip"] = sn.ip();
         snodes_json.push_back(snode);
@@ -678,16 +792,20 @@ void connection_t::process_store(const json& params) {
         }
     }
 
-    const auto pubKey = params["pubKey"].get<std::string>();
     const auto ttl = params["ttl"].get<std::string>();
     const auto nonce = params["nonce"].get<std::string>();
     const auto timestamp = params["timestamp"].get<std::string>();
     const auto data = params["data"].get<std::string>();
 
-    if (pubKey.size() != 66) {
+    bool created;
+    auto pk =
+        user_pubkey_t::create(params["pubKey"].get<std::string>(), created);
+
+    if (!created) {
         response_.result(http::status::bad_request);
-        body_stream_ << "Pubkey must be 66 characters long\n";
-        ARQMA_LOG(debug, "Pubkey must be 66 characters long");
+        body_stream_ << fmt::format("Pubkey must be {} characters long\n",
+                                    get_user_pubkey_size());
+        ARQMA_LOG(error, "Pubkey must be {} characters long", get_user_pubkey_size());
         return;
     }
 
@@ -699,8 +817,8 @@ void connection_t::process_store(const json& params) {
         return;
     }
 
-    if (!service_node_.is_pubkey_for_us(pubKey)) {
-        handle_wrong_swarm(pubKey);
+    if (!service_node_.is_pubkey_for_us(pk)) {
+        handle_wrong_swarm(pk);
         return;
     }
 
@@ -729,7 +847,7 @@ void connection_t::process_store(const json& params) {
     std::string messageHash;
 
     const bool valid_pow =
-        checkPoW(nonce, timestamp, ttl, pubKey, data, messageHash,
+        checkPoW(nonce, timestamp, ttl, pk.str(), data, messageHash,
                  service_node_.get_curr_pow_difficulty());
 #ifndef DISABLE_POW
     if (!valid_pow) {
@@ -750,15 +868,15 @@ void connection_t::process_store(const json& params) {
 
     try {
         const auto msg =
-            message_t{pubKey, data, messageHash, ttlInt, timestampInt, nonce};
+            message_t{pk.str(), data, messageHash, ttlInt, timestampInt, nonce};
         success = service_node_.process_store(msg);
     } catch (std::exception e) {
         response_.result(http::status::internal_server_error);
         response_.set(http::field::content_type, "text/plain");
         body_stream_ << e.what() << "\n";
         ARQMA_LOG(critical,
-                 "Internal Server Error. Could not store message for {}",
-                 obfuscate_pubkey(pubKey));
+                  "Internal Server Error. Could not store message for {}",
+                  obfuscate_pubkey(pk.str()));
         return;
     }
 
@@ -777,7 +895,7 @@ void connection_t::process_store(const json& params) {
     res_body["difficulty"] = service_node_.get_curr_pow_difficulty();
     body_stream_ << res_body.dump();
     ARQMA_LOG(trace, "Successfully stored message for {}",
-             obfuscate_pubkey(pubKey));
+              obfuscate_pubkey(pk.str()));
 }
 
 void connection_t::process_snodes_by_pk(const json& params) {
@@ -789,17 +907,19 @@ void connection_t::process_snodes_by_pk(const json& params) {
         return;
     }
 
-    auto pubKey = params["pubKey"].get<std::string>();
-
-    if (pubKey.size() != 66) {
+    bool success;
+    const auto pk =
+        user_pubkey_t::create(params["pubKey"].get<std::string>(), success);
+    if (!success) {
         response_.result(http::status::bad_request);
-        body_stream_ << "Pubkey must be 66 characters long\n";
-        ARQMA_LOG(debug, "Pubkey must be 66 characters long ");
+        body_stream_ << fmt::format("Pubkey must be {} characters long\n",
+                                    get_user_pubkey_size());
+        ARQMA_LOG(debug, "Pubkey must be {} characters long ",
+                  get_user_pubkey_size());
         return;
     }
 
-    const std::vector<sn_record_t> nodes =
-        service_node_.get_snodes_by_pk(pubKey);
+    const std::vector<sn_record_t> nodes = service_node_.get_snodes_by_pk(pk);
     const json res_body = snodes_to_json(nodes);
 
     response_.result(http::status::ok);
@@ -837,7 +957,7 @@ void connection_t::process_retrieve_all() {
     response_.result(http::status::ok);
 }
 
-void connection_t::handle_wrong_swarm(const std::string& pubKey) {
+void connection_t::handle_wrong_swarm(const user_pubkey_t& pubKey) {
 
     const std::vector<sn_record_t> nodes =
         service_node_.get_snodes_by_pk(pubKey);
@@ -886,8 +1006,8 @@ void connection_t::poll_db(const std::string& pk,
         response_.result(http::status::internal_server_error);
         response_.set(http::field::content_type, "text/plain");
         ARQMA_LOG(critical,
-                 "Internal Server Error. Could not retrieve messages for {}",
-                 obfuscate_pubkey(pk));
+                  "Internal Server Error. Could not retrieve messages for {}",
+                  obfuscate_pubkey(pk));
         return;
     }
 
@@ -896,7 +1016,7 @@ void connection_t::poll_db(const std::string& pk,
 
     if (!items.empty()) {
         ARQMA_LOG(trace, "Successfully retrieved messages for {}",
-                 obfuscate_pubkey(pk));
+                  obfuscate_pubkey(pk));
     }
 
     if (items.empty() && lp_requested) {
@@ -952,19 +1072,31 @@ void connection_t::process_retrieve(const json& params) {
         }
     }
 
-    const auto pub_key = params["pubKey"].get<std::string>();
-    const auto last_hash = params["lastHash"].get<std::string>();
+    bool success;
+    const auto pk =
+        user_pubkey_t::create(params["pubKey"].get<std::string>(), success);
 
-    if (!service_node_.is_pubkey_for_us(pub_key)) {
-        handle_wrong_swarm(pub_key);
+    if (!success) {
+        response_.result(http::status::bad_request);
+        body_stream_ << fmt::format("PubKey must be {} characters long\n",
+                                    get_user_pubkey_size());
+        ARQMA_LOG(debug, "Pubkey must be {} characters long ",
+                  get_user_pubkey_size());
         return;
     }
+
+    if (!service_node_.is_pubkey_for_us(pk)) {
+        handle_wrong_swarm(pk);
+        return;
+    }
+
+    const auto last_hash = params["lastHash"].get<std::string>();
 
     // we are going to send the response anynchronously
     // once we have new data
     delay_response_ = true;
 
-    poll_db(pub_key, last_hash);
+    poll_db(pk.str(), last_hash);
 }
 
 void connection_t::process_client_req() {
@@ -1034,7 +1166,8 @@ void connection_t::process_client_req() {
     } else {
         response_.result(http::status::bad_request);
         body_stream_ << "no method" << method_name << "\n";
-        ARQMA_LOG(debug, "Bad client request: unknown method '{}'", method_name);
+        ARQMA_LOG(debug, "Bad client request: unknown method '{}'",
+                  method_name);
     }
 }
 
@@ -1057,23 +1190,18 @@ void connection_t::register_deadline() {
         // elsewhere if we cancel it.
         if (ec) {
             ARQMA_LOG(error, "Deadline timer error [{}]: {}", ec.value(),
-                     ec.message());
+                      ec.message());
         }
 
-        // TODO: move this to do_close?
-        if (self->notification_ctx_) {
-            self->service_node_.remove_listener(self->notification_ctx_->pubkey,
-                                                self.get());
-        }
         ARQMA_LOG(debug, "Closing [connection_t] socket due to timeout");
-        self->do_close();
+        self->clean_up();
     });
 }
 
 void connection_t::do_close() {
     // Perform the SSL shutdown
     stream_.async_shutdown(std::bind(
-        &connection_t::on_shutdown, shared_from_this(), std::placeholders::_1));
+        &connection_t::on_shutdown, shared_from_this(), sp::_1));
 }
 
 void connection_t::on_shutdown(boost::system::error_code ec) {
@@ -1081,11 +1209,13 @@ void connection_t::on_shutdown(boost::system::error_code ec) {
         // Rationale:
         // http://stackoverflow.com/questions/25587403/boost-asio-ssl-async-shutdown-always-finishes-with-an-error
         ec.assign(0, ec.category());
+    } else if (ec) {
+        ARQMA_LOG(debug, "Could not close ssl stream gracefully, ec: {} ({})", ec.message(), ec.value());
     }
-    if (ec)
-        ARQMA_LOG(error, "Could not close ssl stream gracefully, ec: {}",
-                 ec.message());
 
+    const auto sockfd = stream_.lowest_layer().native_handle();
+    ARQMA_LOG(debug, "Close https socket: {}", sockfd);
+    get_net_stats().record_socket_close(sockfd);
     stream_.lowest_layer().close();
 }
 
@@ -1137,24 +1267,24 @@ HttpClientSession::HttpClientSession(boost::asio::io_context& ioc,
                                      http_callback_t&& cb)
     : ioc_(ioc), socket_(ioc), endpoint_(ep), callback_(cb),
       deadline_timer_(ioc), req_(req) {
-          get_net_stats().http_connections_out++;
-      }
+    get_net_stats().http_connections_out++;
+}
 
-void HttpClientSession::on_connect() {
-
-    ARQMA_LOG(trace, "on connect");
-    http::async_write(socket_, *req_,
-                      std::bind(&HttpClientSession::on_write,
-                                shared_from_this(), std::placeholders::_1,
-                                std::placeholders::_2));
+void HttpClientSession::on_connect()
+{
+  const auto sockfd = socket_.native_handle();
+  ARQMA_LOG(debug, "Open http socket: {}", sockfd);
+  get_net_stats().record_socket_open(sockfd);
+  http::async_write(socket_, *req_, std::bind(&HttpClientSession::on_write,
+                    shared_from_this(), sp::_1, sp::_2));
 }
 
 void HttpClientSession::on_write(error_code ec, size_t bytes_transferred) {
 
     ARQMA_LOG(trace, "on write");
     if (ec) {
-        ARQMA_LOG(error, "Error on write, ec: {}. Message: {}", ec.value(),
-                 ec.message());
+        ARQMA_LOG(error, "Http error on write, ec: {}. Message: {}", ec.value(),
+                  ec.message());
         trigger_callback(SNodeError::ERROR_OTHER, nullptr);
         return;
     }
@@ -1162,9 +1292,8 @@ void HttpClientSession::on_write(error_code ec, size_t bytes_transferred) {
     ARQMA_LOG(trace, "Successfully transferred {} bytes", bytes_transferred);
 
     // Receive the HTTP response
-    http::async_read(socket_, buffer_, res_,
-                     std::bind(&HttpClientSession::on_read, shared_from_this(),
-                               std::placeholders::_1, std::placeholders::_2));
+    http::async_read(socket_, buffer_, res_, std::bind(&HttpClientSession::on_read,
+                     shared_from_this(), sp::_1, sp::_2));
 }
 
 void HttpClientSession::on_read(error_code ec, size_t bytes_transferred) {
@@ -1180,7 +1309,7 @@ void HttpClientSession::on_read(error_code ec, size_t bytes_transferred) {
             trigger_callback(SNodeError::NO_ERROR, std::move(body));
         } else {
             ARQMA_LOG(error, "Http request failed, error code: {}",
-                     res_.result_int());
+                      res_.result_int());
             trigger_callback(SNodeError::HTTP_ERROR, nullptr);
         }
 
@@ -1188,46 +1317,47 @@ void HttpClientSession::on_read(error_code ec, size_t bytes_transferred) {
 
         if (ec != boost::asio::error::operation_aborted) {
             ARQMA_LOG(error, "Error on read: {}. Message: {}", ec.value(),
-                     ec.message());
+                      ec.message());
         }
         trigger_callback(SNodeError::ERROR_OTHER, nullptr);
     }
 }
 
-void HttpClientSession::start() {
-    socket_.async_connect(endpoint_, [this, self = shared_from_this()](
-                                         const error_code& ec) {
-        /// TODO: I think I should just call again if ec == EINTR
-        if (ec) {
-            // We should make sure that we print the error a few levels above,
-            // where we have more context
-            ARQMA_LOG(
-                debug,
-                "[http client]: could not connect to {}:{}, message: {} ({})",
-                endpoint_.address().to_string(), endpoint_.port(), ec.message(),
-                ec.value());
-            trigger_callback(SNodeError::NO_REACH, nullptr);
-            return;
-        }
+void HttpClientSession::start()
+{
+  socket_.async_connect(endpoint_, [this, self = shared_from_this()](const error_code& ec)
+  {
+    if (ec) {
+      if (ec == boost::system::errc::connection_refused) {
+        ARQMA_LOG(debug, "[http client]: count not connect to {}:{}, message: {} ({})",
+                  endpoint_.address().to_string(), endpoint_.port(),
+                  ec.message(), ec.value());
+      } else {
+        ARQMA_LOG(error, "[http client]: could not connect to {}:{}, message: {} ({})",
+                  endpoint_.address().to_string(), endpoint_.port(),
+                  ec.message(), ec.value());
+      }
 
-        self->on_connect();
-    });
+      trigger_callback(SNodeError::NO_REACH, nullptr);
+      return;
+    }
 
-    deadline_timer_.expires_after(SESSION_TIME_LIMIT);
-    deadline_timer_.async_wait(
-        [self = shared_from_this()](const error_code& ec) {
-            if (ec) {
-                if (ec != boost::asio::error::operation_aborted) {
-                    ARQMA_LOG(
-                        error,
-                        "Deadline timer failed in http client session [{}: {}]",
-                        ec.value(), ec.message());
-                }
-            } else {
-                ARQMA_LOG(warn, "client socket timed out");
-                self->socket_.close();
-            }
-        });
+    self->on_connect();
+  });
+
+  deadline_timer_.expires_after(SESSION_TIME_LIMIT);
+  deadline_timer_.async_wait([self = shared_from_this()](const error_code& ec)
+  {
+    if (ec) {
+      if (ec != boost::asio::error::operation_aborted) {
+        ARQMA_LOG(error, "Deadline timer failed in http client session [{}: {}]",
+                  ec.value(), ec.message());
+      }
+    } else {
+      ARQMA_LOG(debug, "client socket timed out");
+      self->clean_up();
+    }
+  });
 }
 
 void HttpClientSession::trigger_callback(SNodeError error,
@@ -1238,40 +1368,46 @@ void HttpClientSession::trigger_callback(SNodeError error,
     deadline_timer_.cancel();
 }
 
+void HttpClientSession::clean_up() {
+  if (!needs_cleanup) {
+    ARQMA_LOG(debug, "No need for cleanup");
+    return;
+  }
+
+  needs_cleanup = false;
+
+  if (!socket_.is_open()) {
+    ARQMA_LOG(critical, "Socket is already closed");
+    return;
+  }
+
+  error_code ec;
+
+  socket_.shutdown(tcp::socket::shutdown_both, ec);
+  if (ec && ec != boost::system::errc::not_connected) {
+    ARQMA_LOG(error, "Socket shutdown failure [{}: {}]", ec.value(), ec.message());
+  }
+
+  const auto sockfd = socket_.native_handle();
+  socket_.close(ec);
+
+  if (ec) {
+    ARQMA_LOG(error, "Closing socket {} failed [{}: {}]", sockfd, ec.value(), ec.message());
+  } else {
+    ARQMA_LOG(debug, "Close http socket: {}", sockfd);
+    get_net_stats().record_socket_close(sockfd);
+  }
+}
+
 /// We execute callback (if haven't already) here to make sure it is called
 HttpClientSession::~HttpClientSession() {
+  if (!used_callback_) {
+    ioc_.post(std::bind(callback_, sn_response_t{SNodeError::ERROR_OTHER, nullptr}));
+  }
 
-    if (!used_callback_) {
-        // If we destroy the session before posting the callback,
-        // it must be due to some error
-        ioc_.post(std::bind(callback_,
-                            sn_response_t{SNodeError::ERROR_OTHER, nullptr}));
-    }
+  get_net_stats().http_connections_out--;
 
-    if (!socket_.is_open()) {
-        ARQMA_LOG(debug, "Socket is already closed");
-        return;
-    }
-
-    error_code ec;
-
-    /// From boost documentation: "For portable behaviour with respect to
-    /// graceful closure of a connected socket, call shutdown() before closing
-    /// the socket."
-    socket_.shutdown(tcp::socket::shutdown_both, ec);
-    // not_connected happens sometimes so don't bother reporting it.
-    if (ec && ec != boost::system::errc::not_connected) {
-        ARQMA_LOG(error, "Socket shutdown failure [{}: {}]", ec.value(),
-                 ec.message());
-    }
-
-    socket_.close(ec);
-
-    if (ec) {
-        ARQMA_LOG(error, "On close socket [{}: {}]", ec.value(), ec.message());
-    }
-
-    get_net_stats().http_connections_out--;
+  this->clean_up();
 }
 
 } // namespace arqma

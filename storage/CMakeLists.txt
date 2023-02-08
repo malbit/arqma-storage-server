@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 
 set(SOURCES
     include/Database.hpp
@@ -8,7 +8,7 @@ set(SOURCES
 
 add_library(storage STATIC ${SOURCES})
 
-set_property(TARGET storage PROPERTY CXX_STANDARD 14)
+set_property(TARGET storage PROPERTY CXX_STANDARD 17)
 
 target_include_directories(storage
     PUBLIC

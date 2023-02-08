@@ -15,6 +15,7 @@
 #include <boost/format.hpp>
 
 #include "swarm.h"
+#include "arqmad_key.h"
 
 constexpr auto ARQMA_SENDER_SNODE_PUBKEY_HEADER = "X-Arqma-Snode-PubKey";
 constexpr auto ARQMA_SNODE_SIGNATURE_HEADER = "X-Arqma-Snode-Signature";
@@ -61,20 +62,22 @@ using http_callback_t = std::function<void(sn_response_t)>;
 
 class ArqmadClient {
 
-    const uint16_t arqmad_rpc_port_;
-    const char* local_ip_ = "127.0.0.1";
     boost::asio::io_context& ioc_;
+    std::string arqmad_rpc_ip_;
+    const uint16_t arqmad_rpc_port_;
 
   public:
-    ArqmadClient(boost::asio::io_context& ioc, uint16_t port);
+    ArqmadClient(boost::asio::io_context& ioc, std::string ip, uint16_t port);
     void make_arqmad_request(boost::string_view method,
-                            const nlohmann::json& params,
-                            http_callback_t&& cb) const;
-    void make_arqmad_request(const std::string& daemon_ip,
-                            const uint16_t daemon_port,
-                            boost::string_view method,
-                            const nlohmann::json& params,
-                            http_callback_t&& cb) const;
+                             const nlohmann::json& params,
+                             http_callback_t&& cb) const;
+    void make_custom_arqmad_request(const std::string& daemon_ip,
+                                    const uint16_t daemon_port,
+                                    boost::string_view method,
+                                    const nlohmann::json& params,
+                                    http_callback_t&& cb) const;
+
+    std::tuple<private_key_t, private_key_ed25519_t, private_key_t> wait_for_privkey();
 };
 
 constexpr auto SESSION_TIME_LIMIT = std::chrono::seconds(30);
@@ -104,6 +107,7 @@ class HttpClientSession
     response_t res_;
 
     bool used_callback_ = false;
+    bool needs_cleanup = false;
 
     void on_connect();
 
@@ -111,8 +115,9 @@ class HttpClientSession
 
     void on_read(boost::system::error_code ec, std::size_t bytes_transferred);
 
-    void trigger_callback(SNodeError error,
-                          std::shared_ptr<std::string>&& body);
+    void trigger_callback(SNodeError error, std::shared_ptr<std::string>&& body);
+
+    void clean_up();
 
   public:
     // Resolver and socket require an io_context
@@ -228,6 +233,8 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     /// (synchronously).
     void process_request();
 
+    void clean_up();
+
     void process_store(const nlohmann::json& params);
 
     void process_retrieve(const nlohmann::json& params);
@@ -255,12 +262,16 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
                                   const std::string& tester_addr,
                                   const std::string& msg_hash);
 
+    void process_blockchain_test_req(uint64_t height,
+                                     const std::string& tester_pk,
+                                     bc_test_params_t params);
+
     bool parse_header(const char* key);
 
     template <typename... Args>
     bool parse_header(const char* first, Args... args);
 
-    void handle_wrong_swarm(const std::string& pubKey);
+    void handle_wrong_swarm(const user_pubkey_t& pubKey);
 
     bool validate_snode_request();
     bool verify_signature(const std::string& signature,
@@ -274,4 +285,29 @@ void run(boost::asio::io_context& ioc, const std::string& ip, uint16_t port,
 
 } // namespace http_server
 
+constexpr const char *error_string(SNodeError err) {
+  switch (err) {
+    case arqma::SNodeError::NO_ERROR: return "NO_ERROR";
+    case arqma::SNodeError::ERROR_OTHER: return "ERROR_OTHER";
+    case arqma::SNodeError::NO_REACH: return "NO_REACH";
+    case arqma::SNodeError::HTTP_ERROR: return "HTTP_ERROR";
+    default: return "[UNKNOWN]";
+  }
+}
+
 } // namespace arqma
+
+namespace fmt {
+template <>
+struct formatter<arqma::SNodeError> {
+    template <typename ParseContext>
+    constexpr auto parse(ParseContext& ctx) {
+        return ctx.begin();
+    }
+
+    template <typename FormatContext>
+    auto format(const arqma::SNodeError& err, FormatContext& ctx) {
+      return format_to(ctx.out(), error_string(err));
+    }
+};
+} // namespace fmt

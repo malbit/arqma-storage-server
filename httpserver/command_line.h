@@ -7,14 +7,18 @@ namespace arqma {
 
 struct command_line_options {
     uint16_t port;
-    uint16_t arqmad_rpc_port = 19994;
+    std::string arqmad_rpc_ip = "127.0.0.1";
+    uint16_t arqmad_rpc_port = 19994; // or 39994 if `stagenet`
     bool force_start = false;
     bool print_version = false;
     bool print_help = false;
+    bool stagenet = false;
     std::string ip;
     std::string log_level = "info";
-    std::string arqmad_key_path;
     std::string data_dir;
+    std::string arqmad_key; // test only
+    std::string arqmad_x25519_key; // test only
+    std::string arqmad_ed25519_key; // test only
 };
 
 class command_line_parser {

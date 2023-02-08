@@ -14,6 +14,8 @@ void make_https_request(boost::asio::io_context& ioc, const std::string& ip,
 class HttpsClientSession
     : public std::enable_shared_from_this<HttpsClientSession> {
 
+    uint64_t connection_idx;
+
     using tcp = boost::asio::ip::tcp;
 
     boost::asio::io_context& ioc_;

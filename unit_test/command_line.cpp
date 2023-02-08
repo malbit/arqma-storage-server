@@ -94,16 +94,6 @@ BOOST_AUTO_TEST_CASE(it_parses_arqmad_rpc_port) {
     BOOST_CHECK_EQUAL(options.arqmad_rpc_port, 12345);
 }
 
-BOOST_AUTO_TEST_CASE(it_parses_arqmad_key) {
-    arqma::command_line_parser parser;
-    const char* argv[] = {"httpserver", "0.0.0.0", "80", "--arqmad-key",
-                          "foobar"};
-    BOOST_CHECK_NO_THROW(parser.parse_args(sizeof(argv) / sizeof(char*),
-                                           const_cast<char**>(argv)));
-    const auto options = parser.get_options();
-    BOOST_CHECK_EQUAL(options.arqmad_key_path, "foobar");
-}
-
 BOOST_AUTO_TEST_CASE(it_parses_data_dir) {
     arqma::command_line_parser parser;
     const char* argv[] = {"httpserver", "0.0.0.0", "80", "--data-dir",

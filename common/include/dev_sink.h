@@ -23,7 +23,7 @@ class dev_sink : public spdlog::sinks::base_sink<Mutex> {
   protected:
     void sink_it_(const spdlog::details::log_msg& msg) override {
         spdlog::memory_buf_t formatted;
-	Base::formatter_->format(msg, formatted);
+        Base::formatter_->format(msg, formatted);
 
         if (primary_buffer_.size() >= BUFFER_SIZE) {
             secondary_buffer_ = std::move(primary_buffer_);
