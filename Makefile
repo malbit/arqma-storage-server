@@ -58,7 +58,6 @@ clean-all:
 
 format:
 	clang-format -style=file -i \
-		pow/**/*.{cpp,hpp} \
 		crypto/**/*.{cpp,hpp} \
 		storage/**/*.{cpp,hpp} \
 		utils/**/*.{cpp,hpp} \

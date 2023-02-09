@@ -140,10 +140,8 @@ struct message_t {
     std::string nonce;
 
     message_t(const std::string& pk, const std::string& text,
-              const std::string& hash, uint64_t ttl, uint64_t timestamp,
-              const std::string& nonce)
-        : pub_key(pk), data(text), hash(hash), ttl(ttl), timestamp(timestamp),
-          nonce(nonce) {}
+              const std::string& hash, uint64_t ttl, uint64_t timestamp)
+        : pub_key(pk), data(text), hash(hash), ttl(ttl), timestamp(timestamp) {}
 };
 
 } // namespace arqma

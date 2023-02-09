@@ -3,7 +3,6 @@ cmake_minimum_required (VERSION 3.10)
 add_executable (Test
     main.cpp
     storage.cpp
-    pow.cpp
     serialization.cpp
     signature.cpp
     rate_limiter.cpp
@@ -14,12 +13,11 @@ add_executable (Test
 
 arqma_add_subdirectory(../common common)
 arqma_add_subdirectory(../storage storage)
-arqma_add_subdirectory(../pow pow)
 arqma_add_subdirectory(../utils utils)
 arqma_add_subdirectory(../crypto crypto)
 arqma_add_subdirectory(../httpserver httpserver)
 
-target_link_libraries(Test PRIVATE common storage pow utils crypto httpserver_lib)
+target_link_libraries(Test PRIVATE common storage utils crypto httpserver_lib)
 
 # boost
 find_package(Boost REQUIRED

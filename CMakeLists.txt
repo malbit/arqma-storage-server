@@ -15,7 +15,6 @@ option(DISABLE_SNODE_SIGNATURE "Generate and verify signatures for inter-snode c
     OFF)
 
 if (INTEGRATION_TEST)
-    add_definitions(-DDISABLE_POW)
     add_definitions(-DINTEGRATION_TEST)
 endif()
 
@@ -27,7 +26,6 @@ endif()
 arqma_add_subdirectory(common)
 arqma_add_subdirectory(utils)
 arqma_add_subdirectory(crypto)
-arqma_add_subdirectory(pow)
 arqma_add_subdirectory(storage)
 arqma_add_subdirectory(httpserver)
 arqma_add_subdirectory(vendors/spdlog)

@@ -237,9 +237,8 @@ connection_t::connection_t(boost::asio::io_context& ioc, ssl::context& ssl_ctx,
     : ioc_(ioc), ssl_ctx_(ssl_ctx), socket_(std::move(socket)),
       stream_(socket_, ssl_ctx_), service_node_(sn),
       channel_cipher_(channel_encryption), rate_limiter_(rate_limiter),
-      repeat_timer_(ioc),
-      deadline_(ioc, SESSION_TIME_LIMIT), notification_ctx_{boost::none},
-      security_(security) {
+      repeat_timer_(ioc), deadline_(ioc, SESSION_TIME_LIMIT),
+      notification_ctx_{boost::none}, security_(security) {
 
     static uint64_t instance_counter = 0;
     conn_idx = instance_counter++;
@@ -482,10 +481,8 @@ void connection_t::process_swarm_req(boost::string_view target) {
     response_.set(ARQMA_SNODE_SIGNATURE_HEADER, security_.get_cert_signature());
 
     if (target == "/swarms/push_batch/v1") {
-
-        response_.result(http::status::ok);
-        service_node_.process_push_batch(request_.body());
-
+      response_.result(http::status::ok);
+      service_node_.process_push_batch(request_.body());
     } else if (target == "/swarms/storage_test/v1") {
         response_.result(http::status::bad_request);
         ARQMA_LOG(debug, "Got storage test request");
@@ -780,8 +777,7 @@ json snodes_to_json(const std::vector<sn_record_t>& snodes) {
 
 void connection_t::process_store(const json& params) {
 
-    constexpr const char* fields[] = {"pubKey", "ttl", "nonce", "timestamp",
-                                      "data"};
+    constexpr const char* fields[] = {"pubKey", "ttl", "timestamp", "data"};
 
     for (const auto& field : fields) {
         if (!params.contains(field)) {
@@ -793,7 +789,6 @@ void connection_t::process_store(const json& params) {
     }
 
     const auto ttl = params["ttl"].get<std::string>();
-    const auto nonce = params["nonce"].get<std::string>();
     const auto timestamp = params["timestamp"].get<std::string>();
     const auto data = params["data"].get<std::string>();
 
@@ -842,60 +837,6 @@ void connection_t::process_store(const json& params) {
         ARQMA_LOG(debug, "Forbidden. Invalid Timestamp: {}", timestamp);
         return;
     }
-
-    // Do not store message if the PoW provided is invalid
-    std::string messageHash;
-
-    const bool valid_pow =
-        checkPoW(nonce, timestamp, ttl, pk.str(), data, messageHash,
-                 service_node_.get_curr_pow_difficulty());
-#ifndef DISABLE_POW
-    if (!valid_pow) {
-        response_.result(432); // unassigned http code
-        response_.set(http::field::content_type, "application/json");
-
-        json res_body;
-        res_body["difficulty"] = service_node_.get_curr_pow_difficulty();
-        ARQMA_LOG(debug, "Forbidden. Invalid PoW nonce: {}", nonce);
-
-        /// This might throw if not utf-8 endoded
-        body_stream_ << res_body.dump();
-        return;
-    }
-#endif
-
-    bool success;
-
-    try {
-        const auto msg =
-            message_t{pk.str(), data, messageHash, ttlInt, timestampInt, nonce};
-        success = service_node_.process_store(msg);
-    } catch (std::exception e) {
-        response_.result(http::status::internal_server_error);
-        response_.set(http::field::content_type, "text/plain");
-        body_stream_ << e.what() << "\n";
-        ARQMA_LOG(critical,
-                  "Internal Server Error. Could not store message for {}",
-                  obfuscate_pubkey(pk.str()));
-        return;
-    }
-
-    if (!success) {
-        response_.result(http::status::service_unavailable);
-        response_.set(http::field::content_type, "text/plain");
-        /// This is not the only reason for faliure
-        body_stream_ << "Service node is initializing\n";
-        ARQMA_LOG(warn, "Service node is initializing");
-        return;
-    }
-
-    response_.result(http::status::ok);
-    response_.set(http::field::content_type, "application/json");
-    json res_body;
-    res_body["difficulty"] = service_node_.get_curr_pow_difficulty();
-    body_stream_ << res_body.dump();
-    ARQMA_LOG(trace, "Successfully stored message for {}",
-              obfuscate_pubkey(pk.str()));
 }
 
 void connection_t::process_snodes_by_pk(const json& params) {

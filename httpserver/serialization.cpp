@@ -174,17 +174,14 @@ std::vector<message_t> deserialize_messages(const std::string& blob) {
         }
 
         /// Deserialize Nonce
-        auto nonce = deserialize_string(slice);
-        if (!nonce) {
-            ARQMA_LOG(debug, "Could not deserialize nonce");
-            return {};
-        }
+        auto unused_nonce = deserialize_string(slice);
+
 
         ARQMA_LOG(trace, "Deserialized data: {}", *data);
 
         ARQMA_LOG(trace, "pk: {}, msg: {}", *pk, *data);
 
-        result.push_back({*pk, *data, *hash, *ttl, *timestamp, *nonce});
+        result.push_back({*pk, *data, *hash, *ttl, *timestamp});
     }
 
     ARQMA_LOG(trace, "=== END ===");
