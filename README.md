@@ -4,7 +4,10 @@ Storage server for Arqma Service Nodes
 Requirements:
 * Boost >= 1.66 (for boost.beast)
 * OpenSSL >= 1.1.1a (for X25519 curves)
-* sodium >= 1.0.16 (for ed25119 to curve25519 conversion)
+* sodium >= 1.0.17 (for ed25119 to curve25519 conversion)
+
+You can, however, download and build static versions these dependencies
+as part of the build by adding `-DBUILD_STATIC_DEPS=ON` option to cmake.
 
 ```
 git submodule update --init

@@ -1,80 +1,113 @@
 #include "reachability_testing.h"
 #include "arqma_logger.h"
+#include "swarm.h"
+#include "utils.hpp"
+#include <chrono>
 
 using std::chrono::steady_clock;
-using namespace std::chrono_literals;
 
 namespace arqma {
 
-namespace detail {
+using fseconds = std::chrono::duration<float, std::chrono::seconds::period>;
+using fminutes = std::chrono::duration<float, std::chrono::minutes::period>;
 
-reach_record_t::reach_record_t() {
-    this->first_failure = steady_clock::now();
-    this->last_tested = this->first_failure;
-}
+static void check_incoming_tests_impl(std::string_view name, const time_point_t& now, const time_point_t& startup, detail::incoming_test_state& incoming)
+{
+  const auto elapsed = now - std::max(startup, incoming.last_test);
+  bool failing = elapsed > reachability_testing::MAX_TIME_WITHOUT_PING;
+  bool whine = failing != incoming.was_failing || (failing && now - incoming.last_whine > reachability_testing::WHINING_INTERVAL);
 
-} // namespace detail
+  incoming.was_failing = failing;
 
-constexpr std::chrono::minutes UNREACH_GRACE_PERIOD = 120min;
-
-bool reachability_records_t::record_unreachable(const sn_pub_key_t& sn) {
-
-    const auto it = offline_nodes_.find(sn);
-
-    if (it == offline_nodes_.end()) {
-        ARQMA_LOG(debug, "Adding a new node to UNREACHABLE: {}", sn);
-        offline_nodes_.insert({sn, {}});
-    } else {
-        ARQMA_LOG(debug, "Node is ALREAY known to be UNREACHABLE: {}", sn);
-
-        it->second.last_tested = steady_clock::now();
-
-        const auto elapsed = it->second.last_tested - it->second.first_failure;
-        const auto elapsed_sec =
-            std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-        ARQMA_LOG(debug, "First time failed {} seconds ago", elapsed_sec);
-
-        if (it->second.reported) {
-            ARQMA_LOG(debug, "Already reported node: {}", sn);
-        } else if (elapsed > UNREACH_GRACE_PERIOD) {
-            ARQMA_LOG(debug, "Will REPORT this node to Arqmad!");
-            return true;
-        }
+  if (whine)
+  {
+    incoming.last_whine = now;
+    if (!failing)
+    {
+      ARQMA_LOG(info, "{} ping received. port is likely reachable again", name);
     }
-
-    return false;
-}
-
-bool reachability_records_t::expire(const sn_pub_key_t& sn) {
-  bool erased = offline_nodes_.erase(sn);
-  if (erased)
-    ARQMA_LOG(debug, "Removed entry for {}", sn);
-
-  return erased;
-}
-
-void reachability_records_t::set_reported(const sn_pub_key_t& sn) {
-
-    const auto it = offline_nodes_.find(sn);
-    if (it != offline_nodes_.end()) {
-        it->second.reported = true;
+    else
+    {
+      if (incoming.last_test.time_since_epoch() == 0s)
+      {
+        ARQMA_LOG(warn, "Have NEVER received {} pings!", name);
+      }
+      else
+      {
+        ARQMA_LOG(warn, "Have not received {} pings for a long time ({:.1f} mins)!", name, fminutes{elapsed}.count());
+      }
+      ARQMA_LOG(warn, "Please check your {} port. Not being reachable over {} may result in a deregistration!", name, name);
     }
+  }
 }
 
-boost::optional<sn_pub_key_t> reachability_records_t::next_to_test() {
+void reachability_testing::check_incoming_tests(const time_point_t& now)
+{
+  check_incoming_tests_impl("HTTP", now, startup, last_https);
+  check_incoming_tests_impl("ArqmaMQ", now, startup, last_amq);
+}
 
-    const auto it = std::min_element(
-        offline_nodes_.begin(), offline_nodes_.end(),
-        [&](const auto& lhs, const auto& rhs) {
-            return lhs.second.last_tested < rhs.second.last_tested;
-        });
+void reachability_testing::incoming_ping(bool amq, const time_point_t& now)
+{
+  (amq ? last_amq : last_https).last_test = now;
+}
 
-    if (it == offline_nodes_.end()) {
-        return boost::none;
-    } else {
-        ARQMA_LOG(debug, "Selecting to be re-tested: {}", it->first);
-        return it->first;
-    }
+std::optional<sn_record_t> reachability_testing::next_random(const Swarm& swarm, const time_point_t& now, bool requeue)
+{
+  if (next_general_test > now)
+    return std::nullopt;
+  next_general_test = now + std::chrono::duration_cast<time_point_t::duration>(fseconds(TESTING_INTERVAL(util::rng())));
+
+  auto& my_pk = swarm.our_address().pubkey_legacy;
+  while (!testing_queue.empty())
+  {
+    auto& pk = testing_queue.back();
+    std::optional<sn_record_t> sn;
+    if (pk != my_pk && !failing.count(pk))
+      sn = swarm.find_node(pk);
+    testing_queue.pop_back();
+    if (sn)
+      return sn;
+  }
+  if (!requeue)
+    return std::nullopt;
+
+  auto& all = swarm.all_funded_nodes();
+  testing_queue.reserve(all.size());
+
+  for (const auto& [pk, _sn] : all)
+    testing_queue.push_back(pk);
+
+  std::shuffle(testing_queue.begin(), testing_queue.end(), util::rng());
+
+  return next_random(swarm, now, false);
+}
+
+std::vector<std::pair<sn_record_t, int>> reachability_testing::get_failing(const Swarm& swarm, const time_point_t& now)
+{
+  std::vector<std::pair<sn_record_t, int>> result;
+  while (result.size() < MAX_RETESTS_PER_TICK && !failing_queue.empty())
+  {
+    auto& [pk, retest_time, failures] = failing_queue.top();
+    if (retest_time > now)
+      break;
+    if (auto sn = swarm.find_node(pk))
+      result.emplace_back(std::move(*sn), failures);
+    failing.erase(pk);
+    failing_queue.pop();
+  }
+  return result;
+}
+
+void reachability_testing::add_failing_node(const legacy_pubkey& pk, int previous_failures)
+{
+  using namespace std::chrono;
+
+  if (previous_failures < 0)
+    previous_failures = 0;
+  auto next_test = steady_clock::now() + duration_cast<time_point_t::duration>(previous_failures * TESTING_BACKOFF + fseconds{TESTING_INTERVAL(util::rng())});
+
+  failing_queue.emplace(pk, next_test, previous_failures + 1);
 }
 
 } // namespace arqma

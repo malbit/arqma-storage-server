@@ -1,15 +1,16 @@
 #pragma once
 
 #include "http_connection.h"
+#include <optional>
 #include <functional>
 
 namespace arqma {
 using http_callback_t = std::function<void(sn_response_t)>;
 
-void make_https_request(boost::asio::io_context& ioc, const std::string& ip,
-                        uint16_t port, const std::string& sn_pubkey_b32z,
-                        const std::shared_ptr<request_t>& req,
-                        http_callback_t&& cb);
+void make_https_request_to_sn(boost::asio::io_context& ioc, const sn_record_t& sn,
+                              std::shared_ptr<request_t> req, http_callback_t&& cb);
+
+void make_https_request(boost::asio::io_context& ioc, const std::string& url, uint16_t port, std::shared_ptr<request_t> req, http_callback_t&& cb);
 
 class HttpsClientSession
     : public std::enable_shared_from_this<HttpsClientSession> {
@@ -33,8 +34,10 @@ class HttpsClientSession
     /// it is very common for the same request to be
     /// sent to multiple snodes
     std::shared_ptr<request_t> req_;
-    response_t res_;
-    std::string server_pub_key_b32z;
+
+    http::response_parser<http::string_body> response_;
+
+    std::optional<legacy_pubkey> server_pubkey_;
 
     bool used_callback_ = false;
 
@@ -44,8 +47,7 @@ class HttpsClientSession
 
     void on_read(boost::system::error_code ec, std::size_t bytes_transferred);
 
-    void trigger_callback(SNodeError error,
-                          std::shared_ptr<std::string>&& body);
+    void trigger_callback(SNodeError error, std::shared_ptr<std::string>&& body, std::optional<response_t> raw_response = std::nullopt);
 
     void on_handshake(boost::system::error_code ec);
     bool verify_signature();
@@ -57,8 +59,8 @@ class HttpsClientSession
     // Resolver and socket require an io_context
     HttpsClientSession(boost::asio::io_context& ioc, ssl::context& ssl_ctx,
                        tcp::resolver::results_type resolve_results,
-                       const std::shared_ptr<request_t>& req,
-                       http_callback_t&& cb, const std::string& sn_pubkey_b32z);
+                       const char* host, std::shared_ptr<request_t> req,
+                       http_callback_t&& cb, std::optional<legacy_pubkey> sn_pubkey);
 
     // initiate the client connection
     void start();

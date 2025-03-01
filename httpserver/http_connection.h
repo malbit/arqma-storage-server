@@ -1,27 +1,34 @@
 #pragma once
 
 #include <chrono>
-#include <iostream>
+#include <filesystem>
+#include <iosfwd>
 #include <map>
 #include <memory>
+#include <optional>
 
-#include "../external/json.hpp"
+#include <nlohmann/json_fwd.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl/stream.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
-#include <boost/filesystem.hpp>
 #include <boost/format.hpp>
 
-#include "swarm.h"
+#include "arqma_common.h"
 #include "arqmad_key.h"
+#include "arqma_logger.h"
+#include "swarm.h"
 
-constexpr auto ARQMA_SENDER_SNODE_PUBKEY_HEADER = "X-Arqma-Snode-PubKey";
-constexpr auto ARQMA_SNODE_SIGNATURE_HEADER = "X-Arqma-Snode-Signature";
+namespace arqma {
 
-template <typename T>
-class ChannelEncryption;
+inline constexpr auto ARQMA_SENDER_SNODE_PUBKEY_HEADER = "X-Arqma-Snode-PubKey";
+inline constexpr auto ARQMA_SNODE_SIGNATURE_HEADER = "X-Arqma-Snode-Signature";
+inline constexpr auto ARQMA_SENDER_KEY_HEADER = "X-Sender-Public-Key";
+inline constexpr auto ARQMA_TARGET_SNODE_KEY = "X-Target-Snode-Key";
+inline constexpr auto ARQMA_LONG_POLL_HEADER = "X-Arqma-Long-Poll";
+
+inline constexpr auto SESSION_TIME_LIMIT = 60s;
 
 class RateLimiter;
 
@@ -31,62 +38,28 @@ namespace ssl = boost::asio::ssl;    // from <boost/asio/ssl.hpp>
 using request_t = http::request<http::string_body>;
 using response_t = http::response<http::string_body>;
 
-namespace arqma {
-struct message_t;
+std::shared_ptr<request_t> build_post_request(const ed25519_pubkey& host, const char* target, std::string data);
+
 struct Security;
 
-namespace storage {
-struct Item;
-}
-
-using storage::Item;
+class RequestHandler;
+class Response;
 
 enum class SNodeError { NO_ERROR, ERROR_OTHER, NO_REACH, HTTP_ERROR };
 
 struct sn_response_t {
     SNodeError error_code;
     std::shared_ptr<std::string> body;
+    std::optional<response_t> raw_response;
 };
 
-struct blockchain_test_answer_t {
-    uint64_t res_height;
-};
-
-/// Blockchain test parameters
-struct bc_test_params_t {
-    uint64_t max_height;
-    uint64_t seed;
-};
+std::ostream& operator<<(std::ostream& os, const sn_reponse_t& res);
 
 using http_callback_t = std::function<void(sn_response_t)>;
 
-class ArqmadClient {
+void arqmad_json_rpc_request(boost::asio::io_context& ioc, const std::string& daemon_ip, const uint16_t daemon_port, std::string_view method, const nlohmann::json& params, http_callback_t&& cb);
 
-    boost::asio::io_context& ioc_;
-    std::string arqmad_rpc_ip_;
-    const uint16_t arqmad_rpc_port_;
-
-  public:
-    ArqmadClient(boost::asio::io_context& ioc, std::string ip, uint16_t port);
-    void make_arqmad_request(boost::string_view method,
-                             const nlohmann::json& params,
-                             http_callback_t&& cb) const;
-    void make_custom_arqmad_request(const std::string& daemon_ip,
-                                    const uint16_t daemon_port,
-                                    boost::string_view method,
-                                    const nlohmann::json& params,
-                                    http_callback_t&& cb) const;
-
-    std::tuple<private_key_t, private_key_ed25519_t, private_key_t> wait_for_privkey();
-};
-
-constexpr auto SESSION_TIME_LIMIT = std::chrono::seconds(30);
-
-// TODO: the name should indicate that we are actually trying to send data
-// unlike in `make_post_request`
-void make_http_request(boost::asio::io_context& ioc, const std::string& ip,
-                       uint16_t port, const std::shared_ptr<request_t>& req,
-                       http_callback_t&& cb);
+void make_http_request(boost::asio::io_context& ioc, const std::string& ip, uint16_t port, std::shared_ptr<request_t> req, http_callback_t&& cb);
 
 class HttpClientSession
     : public std::enable_shared_from_this<HttpClientSession> {
@@ -150,7 +123,7 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     const Security& security_;
 
     // The request message.
-    request_t request_;
+    http::request_parser<http::string_body> request_;
 
     // The response message.
     response_t response_;
@@ -161,7 +134,7 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
 
     ServiceNode& service_node_;
 
-    ChannelEncryption<std::string>& channel_cipher_;
+    RequestHandler& request_handler_;
 
     RateLimiter& rate_limiter_;
 
@@ -188,17 +161,18 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
         boost::asio::steady_timer timer;
         // the message is stored here momentarily; needed because
         // we can't pass it using current notification mechanism
-        boost::optional<message_t> message;
+        std::optional<message_t> message;
         // Messenger public key that this connection is registered for
         std::string pubkey;
     };
 
-    boost::optional<notification_context_t> notification_ctx_;
+    std::optional<notification_context_t> notification_ctx_;
+
+    std::function<void(response_t&)> response_modifier_;
 
   public:
     connection_t(boost::asio::io_context& ioc, ssl::context& ssl_ctx,
-                 tcp::socket socket, ServiceNode& sn,
-                 ChannelEncryption<std::string>& channel_encryption,
+                 tcp::socket socket, ServiceNode& sn, RequestHandler& rh,
                  RateLimiter& rate_limiter, const Security& security);
 
     ~connection_t();
@@ -209,7 +183,7 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     /// Initiate the asynchronous operations associated with the connection.
     void start();
 
-    void notify(boost::optional<const message_t&> msg);
+    void notify(const message_t* msg);
 
   private:
     void do_handshake();
@@ -223,69 +197,47 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     /// process GET /get_stats/v1
     void on_get_stats();
 
-    /// process GET /get_logs/v1; only returns errors atm
-    void on_get_logs();
-
-    /// Check the database for new data, reschedule if empty
-    void poll_db(const std::string& pk, const std::string& last_hash);
-
     /// Determine what needs to be done with the request message
     /// (synchronously).
     void process_request();
 
     void clean_up();
 
-    void process_store(const nlohmann::json& params);
-
-    void process_retrieve(const nlohmann::json& params);
-
-    void process_snodes_by_pk(const nlohmann::json& params);
-
-    void process_retrieve_all();
-
-    template <typename T>
-    void respond_with_messages(const std::vector<T>& messages);
-
     /// Asynchronously transmit the response message.
     void write_response();
 
     /// Syncronously (?) process client store/load requests
-    void process_client_req();
+    void process_client_req_rate_limited();
 
-    void process_swarm_req(boost::string_view target);
+    void process_swarm_req(std::string_view target);
+
+    void process_onion_req_v2();
 
     // Check whether we have spent enough time on this connection.
     void register_deadline();
 
     /// Process storage test request and repeat if necessary
     void process_storage_test_req(uint64_t height,
-                                  const std::string& tester_addr,
+                                  const legacy_pubkey& tester_addr,
                                   const std::string& msg_hash);
 
-    void process_blockchain_test_req(uint64_t height,
-                                     const std::string& tester_pk,
-                                     bc_test_params_t params);
+    void set_response(const Response& res);
 
     bool parse_header(const char* key);
 
     template <typename... Args>
     bool parse_header(const char* first, Args... args);
 
-    void handle_wrong_swarm(const user_pubkey_t& pubKey);
-
     bool validate_snode_request();
-    bool verify_signature(const std::string& signature,
-                          const std::string& public_key_b32z);
 };
 
 void run(boost::asio::io_context& ioc, const std::string& ip, uint16_t port,
-         const boost::filesystem::path& base_path, ServiceNode& sn,
-         ChannelEncryption<std::string>& channelEncryption,
-         RateLimiter& rate_limiter, Security&);
+         const std::filesystem::path& base_path, ServiceNode& sn,
+         RequestHandler& rh, RateLimiter& rate_limiter, Security&);
 
 } // namespace http_server
 
-constexpr const char *error_string(SNodeError err) {
+constexpr const char* error_string(SNodeError err) {
   switch (err) {
     case arqma::SNodeError::NO_ERROR: return "NO_ERROR";
     case arqma::SNodeError::ERROR_OTHER: return "ERROR_OTHER";

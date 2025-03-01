@@ -3,14 +3,14 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <arqmamq/auth.h>
 
 #include "arqma_common.h"
+#include "sn_record.h"
 
-namespace boost {
-namespace asio {
+namespace boost::asio {
 class io_context;
-}
-} // namespace boost
+} // namespace boost::asio
 
 namespace arqma {
 
@@ -26,13 +26,20 @@ using all_swarms_t = std::vector<SwarmInfo>;
 struct block_update_t {
     all_swarms_t swarms;
     std::vector<sn_record_t> decommissioned_nodes;
+    arqmamq::pubkey_set active_x25519_pubkeys;
     uint64_t height;
     std::string block_hash;
     int hardfork;
+    bool unchanged = false;
 };
 
-swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms,
-                           const user_pubkey_t& pk);
+void debug_print(std::ostream& os, const block_update_t& bu);
+
+swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms, const user_pubkey_t& pk);
+
+std::pair<int, int> count_missing_data(const block_update_t& bu);
+
+auto apply_ips(const all_swarms_t& swarms_to_keep, const all_swarms_t& other_swarms) -> all_swarms_t;
 
 struct SwarmEvents {
 
@@ -55,8 +62,9 @@ class Swarm {
     std::vector<SwarmInfo> all_valid_swarms_;
     sn_record_t our_address_;
     std::vector<sn_record_t> swarm_peers_;
-
-    std::vector<sn_record_t> all_funded_nodes_;
+    std::unordered_map<legacy_pubkey, sn_record_t> all_funded_nodes_;
+    std::unordered_map<ed25519_pubkey, legacy_pubkey> all_funded_ed25519_;
+    std::unordered_map<x25519_pubkey, legacy_pubkey> all_funded_x25519_;
 
     bool is_existing_swarm(swarm_id_t sid) const;
 
@@ -77,13 +85,13 @@ class Swarm {
 
     bool is_pubkey_for_us(const user_pubkey_t& pk) const;
 
-    bool is_fully_funded_node(const std::string& sn_address) const;
-
-    const std::vector<sn_record_t>& other_nodes() const;
+    const std::vector<sn_record_t>& other_nodes() const { return swarm_peers_; }
 
     const std::vector<SwarmInfo>& all_valid_swarms() const {
         return all_valid_swarms_;
     }
+
+    const sn_record_t& our_address() const { return our_address_; }
 
     swarm_id_t our_swarm_id() const { return cur_swarm_id_; }
 
@@ -91,9 +99,14 @@ class Swarm {
 
     void set_swarm_id(swarm_id_t sid);
 
-    boost::optional<sn_record_t> choose_funded_node() const;
-    boost::optional<sn_record_t> find_node_by_port(uint16_t port) const;
-    boost::optional<sn_record_t> get_node_by_pk(const sn_pub_key_t& pk) const;
+    const std::unordered_map<legacy_pubkey, sn_record_t>& all_funded_nodes() const
+    {
+      return all_funded_nodes_;
+    }
+
+    std::optional<sn_record_t> find_node(const legacy_pubkey& pk) const;
+    std::optional<sn_record_t> find_node(const ed25519_pubkey& pk) const;
+    std::optional<sn_record_t> find_node(const x25519_pubkey& pk) const;
 };
 
 } // namespace arqma

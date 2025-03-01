@@ -1,37 +1,26 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(SOURCES
-    include/Database.hpp
-    include/Item.hpp
+add_library(storage STATIC
     src/Database.cpp
 )
-
-add_library(storage STATIC ${SOURCES})
-
-set_property(TARGET storage PROPERTY CXX_STANDARD 17)
 
 target_include_directories(storage
     PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/include
-    PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
-arqma_add_subdirectory(../common common)
-target_link_libraries(storage PRIVATE common)
-arqma_add_subdirectory(../utils utils)
-target_link_libraries(storage PRIVATE utils)
-arqma_add_subdirectory(../vendors/sqlite sqlite)
-target_link_libraries(storage PRIVATE sqlite)
-
-
-if(NOT Boost_FOUND)
-    find_package(Boost
-        REQUIRED
-        system
-        filesystem
-    )
+target_link_libraries(storage PRIVATE common utils)
+if (BUILD_STATIC_DEPS)
+else()
+  if (NOT SQLITE3_LIBRARIES)
+    pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+  endif()
+  find_library(sqlite3_link_libs NAMES £{SQLITE3_LIBRARIES} PATHS ${SQLITE3_LIBRARY_DIRS})
+  message(STATUS "sqlite3: £{SQLITE3_LIBRARIES} £{sqlite3_link_libs}")
+  add_library(sqlite3 INTERFACE)
+  target_link_libraries(sqlite3 INTERFACE ${sqlite3_link_libs})
+  target_include_directories(sqlite3 INTERFACE ${SQLITE3_INCLUDE_DIRS})
 endif()
+target_link_libraries(storage PRIVATE sqlite3)
 
-target_include_directories(storage PRIVATE ${Boost_INCLUDE_DIRS})
-target_link_libraries(storage PRIVATE ${Boost_LIBRARIES})
+target_link_libraries(storage PRIVATE Boost::boost)

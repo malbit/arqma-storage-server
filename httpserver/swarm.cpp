@@ -4,8 +4,9 @@
 
 #include "service_node.h"
 
-#include <stdlib.h>
+#include <cstdlib>
 #include <unordered_map>
+#include <ostream>
 
 #include "utils.hpp"
 
@@ -19,6 +20,25 @@ static bool swarm_exists(const all_swarms_t& all_swarms,
         [&swarm](const SwarmInfo& si) { return si.swarm_id == swarm; });
 
     return it != all_swarms.end();
+}
+
+void debug_print(std::ostream& os, const block_update_t& bu)
+{
+  os << "Block update: {\n";
+  os << "  height: " << bu.height << '\n';
+  os << "  block hash: " << bu.block_hash << '\n';
+  os << "  hardfork: " << bu.hardfork << '\n';
+  os << "  swarms: [\n";
+
+  for (const SwarmInfo &swarm : bu.swarms)
+  {
+    os << "    {\n";
+    os << "      id: " << swarm.swarm_id << '\n';
+    os << "    }\n";
+  }
+
+  os << "  ]\n"
+  os << "}\n"
 }
 
 Swarm::~Swarm() = default;
@@ -113,42 +133,56 @@ void Swarm::set_swarm_id(swarm_id_t sid) {
     cur_swarm_id_ = sid;
 }
 
-static std::unordered_map<std::string, sn_record_t>
-get_snode_map_from_swarms(const all_swarms_t& swarms) {
-
-    std::unordered_map<std::string, sn_record_t> snode_map;
+static auto get_snode_map_from_swarms(const all_swarms_t& swarms)
+{
+    std::unordered_map<legacy_pubkey, sn_record_t> snode_map;
     for (const auto& swarm : swarms) {
         for (const auto& snode : swarm.snodes) {
-            snode_map.insert({snode.sn_address(), snode});
+            snode_map.emplace(snode.pubkey_legacy, snode);
         }
     }
     return snode_map;
 }
 
-static all_swarms_t apply_ips(const all_swarms_t& swarms_to_keep,
-                              const all_swarms_t& other_swarms) {
+template <typename T>
+bool update_if_changed(T& val, const T& new_val, const std::common_type_t<T>& ignore_val)
+{
+  if (new_val != ignore_val && new_val != val)
+  {
+    val = new_val;
+    return true;
+  }
+  return false;
+}
+
+auto apply_ips(const all_swarms_t& swarms_to_keep, const all_swarms_t& other_swarms) -> all_swarms_t {
 
     all_swarms_t result_swarms = swarms_to_keep;
     const auto other_snode_map = get_snode_map_from_swarms(other_swarms);
-    for (auto& swarm : result_swarms) {
-        for (auto& snode : swarm.snodes) {
+    int updates_count = 0;
+    for (auto& [swarm_id, snodes] : result_swarms) {
+        for (auto& snode : snodes) {
             const auto other_snode_it =
-                other_snode_map.find(snode.sn_address());
+                other_snode_map.find(snode.pubkey_legacy);
             if (other_snode_it != other_snode_map.end()) {
-                const auto& other_snode = other_snode_it->second;
-                // Keep swarms_to_keep but don't overwrite with default IPs
-                if (snode.ip() == "0.0.0.0") {
-                    snode.set_ip(other_snode.ip());
-                }
+              auto& sn = other_snode_it->second;
+              bool updated = false;
+              updated += update_if_changed(snode.ip, sn.ip, "0.0.0.0");
+              updated += update_if_changed(snode.port, sn.port, 0);
+              updated += update_if_changed(snode.arqmq_port, sn.arqmq_port, 0);
+              if (updated)
+                updates_count++;
             }
         }
     }
+    ARQMA_LOG(debug, "Updated {} entries from arqmad", updates_count);
     return result_swarms;
 }
 
-void Swarm::apply_swarm_changes(const all_swarms_t& new_swarms) {
-
-    all_valid_swarms_ = apply_ips(new_swarms, all_valid_swarms_);
+void Swarm::apply_swarm_changes(const all_swarms_t& new_swarms)
+{
+  ARQMA_LOG(trace, "Applying swarm changes");
+  all_valid_swarms_ = apply_ips(new_swarms, all_valid_swarms_);
 }
 
 void Swarm::update_state(const all_swarms_t& swarms,
@@ -160,7 +194,7 @@ void Swarm::update_state(const all_swarms_t& swarms,
     }
 
     for (const sn_record_t& sn : events.new_snodes) {
-        ARQMA_LOG(info, "EVENT: detected new SN: {}", sn);
+        ARQMA_LOG(info, "EVENT: detected new SN: {}", sn.pubkey_legacy);
     }
 
     for (swarm_id_t swarm : events.new_swarms) {
@@ -183,46 +217,45 @@ void Swarm::update_state(const all_swarms_t& swarms,
         [this](const sn_record_t& record) { return record != our_address_; });
 
     all_funded_nodes_.clear();
+    all_funded_ed25519_.clear();
+    all_funded_x25519_.clear();
 
     for (const auto& si : swarms) {
         for (const auto& sn : si.snodes) {
-            all_funded_nodes_.push_back(sn);
+            all_funded_nodes_.emplace(sn.pubkey_legacy, sn);
         }
     }
 
     for (const auto& sn : decommissioned) {
-        all_funded_nodes_.push_back(sn);
+        all_funded_nodes_.emplace(sn.pubkey_legacy, sn);
+    }
+
+    for (const auto& [pk, sn] : all_funded_nodes_)
+    {
+      all_funded_ed25519_.emplace(sn.pubkey_ed25519, pk);
+      all_funded_x25519_.emplace(sn.pubkey_x25519, pk);
     }
 }
 
-boost::optional<sn_record_t> Swarm::choose_funded_node() const {
-    if (all_funded_nodes_.empty())
-        return boost::none;
-
-    const auto idx =
-        util::uniform_distribution_portable(all_funded_nodes_.size());
-
-    return all_funded_nodes_[idx];
+std::optional<sn_record_t> Swarm::find_node(const legacy_pubkey& pk) const
+{
+  if (auto it = all_funded_nodes_.find(pk); it != all_funded_nodes_.end())
+    return it->second;
+  return std::nullopt;
 }
 
-boost::optional<sn_record_t> Swarm::find_node_by_port(uint16_t port) const {
-  for (const auto& sn : all_funded_nodes_) {
-    if (sn.port() == port) {
-      return sn;
-    }
-  }
-
-  return boost::none;
+std::optional<sn_record_t> Swarm::find_node(const ed25519_pubkey& pk) const
+{
+  if (auto it = all_funded_ed25519_.find(pk); it != all_funded_ed25519_.end())
+    return find_node(it->second);
+  return std::nullopt;
 }
 
-boost::optional<sn_record_t> Swarm::get_node_by_pk(const sn_pub_key_t& pk) const {
-  for (const auto& sn : all_funded_nodes_) {
-    if (sn.pub_key_base32z() == pk) {
-      return sn;
-    }
-  }
-
-  return boost::none;
+std::optional<sn_record_t> Swarm::find_node(const x25519_pubkey& pk) const
+{
+  if (auto it = all_funded_x25519_.find(pk); it != all_funded_x25519_.end())
+    return find_node(it->second);
+  return std::nullopt;
 }
 
 static uint64_t hex_to_u64(const user_pubkey_t& pk) {
@@ -247,13 +280,6 @@ static uint64_t hex_to_u64(const user_pubkey_t& pk) {
 
 bool Swarm::is_pubkey_for_us(const user_pubkey_t& pk) const {
     return cur_swarm_id_ == get_swarm_by_pk(all_valid_swarms_, pk);
-}
-
-bool Swarm::is_fully_funded_node(const std::string& sn_address) const {
-    return std::any_of(all_funded_nodes_.begin(), all_funded_nodes_.end(),
-                       [&sn_address](const sn_record_t& sn) {
-                           return sn.sn_address() == sn_address;
-                       });
 }
 
 swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms,
@@ -312,8 +338,25 @@ swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms,
     return cur_best;
 }
 
-const std::vector<sn_record_t>& Swarm::other_nodes() const {
-    return swarm_peers_;
+std::pair<int, int> count_missing_data(const block_update_t& bu)
+{
+  auto result = std::make_pair(0, 0);
+  auto& [missing, total] = result;
+
+  for (auto& swarm : bu.swarms)
+  {
+    for (auto& snode : swarm.snodes)
+    {
+      total++;
+      if (snode.ip.empty() || snode.ip == "0.0.0.0" || !snode.port || !snode.arqmq_port ||
+                              !snode.pubkey_ed25519 || !snode.pubkey_x25519)
+      {
+        ARQMA_LOG(warn, "well, WTF?!? -> {} {} {} {} {}", snode.ip, snode.port, snode.arqmq_port, snode.pubkey_ed25519, snode.pubkey_x25519);
+        missing++;
+      }
+    }
+  }
+  return result;
 }
 
 } // namespace arqma

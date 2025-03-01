@@ -1,144 +1,223 @@
 #include "channel_encryption.hpp"
 
-#include <boost/algorithm/hex.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sodium.h>
+#include <arqmamq/hex.h>
+
+#include "utils.hpp"
 
 #include <exception>
-#include <string>
+#include <iostream>
 
-std::vector<uint8_t> hexToBytes(const std::string& hex) {
-    std::vector<uint8_t> temp;
-    boost::algorithm::unhex(hex, std::back_inserter(temp));
-    return temp;
+namespace arqma {
+
+namespace {
+
+std::vector<uint8_t> calculate_shared_secret(const x25519_seckey& seckey, const x25519_pubkey& pubkey)
+{
+  std::vector<uint8_t> secret(crypto_scalarmult_BYTES);
+  static_assert(sizeof(pubkey) == crypto_scalarmult_BYTES);
+
+  if (crypto_scalarmult(secret.data(), seckey.data(), pubkey.data()) != 0)
+  {
+    throw std::runtime_error("Shared key derivation failed (crypto_scalarmult)");
+  }
+  return secret;
 }
 
-template <typename T>
-ChannelEncryption<T>::ChannelEncryption(const std::vector<uint8_t>& private_key)
-    : private_key_(private_key) {}
-
-template <typename T>
-std::vector<uint8_t> ChannelEncryption<T>::calculateSharedSecret(
-    const std::vector<uint8_t>& pubKey) const {
-    std::vector<uint8_t> sharedSecret(crypto_scalarmult_BYTES);
-    if (pubKey.size() != crypto_scalarmult_curve25519_BYTES) {
-        throw std::runtime_error("Bad pubKey size");
-    }
-    if (crypto_scalarmult(sharedSecret.data(), this->private_key_.data(),
-                          pubKey.data()) != 0) {
-        throw std::runtime_error(
-            "Shared key derivation failed (crypto_scalarmult)");
-    }
-    return sharedSecret;
+EncryptType parse_enc_type(std::string_view enc_type)
+{
+  if (enc_type == "aes-gcm" || enc_type == "gcm") return EncryptType::aes_gcm;
+  if (enc_type == "aes-cbc" || enc_type == "cbc") return EncryptType::aes_cbc;
+  throw std::runtime_error{"Invalid encryption type " + std::string{enc_type}};
 }
 
-template <typename T>
-T ChannelEncryption<T>::encrypt(const T& plaintext,
-                                const std::string& pubKey) const {
-    const std::vector<uint8_t> pubKeyBytes = hexToBytes(pubKey);
-    const std::vector<uint8_t> sharedKey = calculateSharedSecret(pubKeyBytes);
-
-    // Initialise cipher
-    const EVP_CIPHER* cipher = EVP_aes_256_cbc();
-    const int ivLength = EVP_CIPHER_iv_length(cipher);
-
-    // Generate IV
-    unsigned char iv[ivLength];
-    if (RAND_bytes(iv, ivLength) != 1) {
-        throw std::runtime_error("Could not generate IV");
-    }
-
-    // Initialise cipher context
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (EVP_EncryptInit_ex(ctx, cipher, NULL, sharedKey.data(), iv) <= 0) {
-        throw std::runtime_error("Could not initialise encryption context");
-    }
-
-    int len;
-    size_t ciphertext_len = 0;
-    auto p = reinterpret_cast<const unsigned char*>(plaintext.data());
-    const size_t plaintext_len = plaintext.size();
-
-    // Add some padding of 'blockSize' as upper limit
-    const int blockSize = EVP_CIPHER_CTX_block_size(ctx);
-    T output;
-    output.resize(plaintext_len + blockSize);
-    auto o = reinterpret_cast<unsigned char*>(&output[0]);
-
-    // Encrypt every full blocks
-    if (EVP_EncryptUpdate(ctx, o, &len, p, plaintext_len) <= 0) {
-        throw std::runtime_error("Could not encrypt plaintext");
-    }
-    ciphertext_len += len;
-
-    // Encrypt any remaining partial blocks
-    if (EVP_EncryptFinal_ex(ctx, o + len, &len) <= 0) {
-        throw std::runtime_error("Could not finalise encryption");
-    }
-    ciphertext_len += len;
-
-    // Remove excess padding
-    output.resize(ciphertext_len);
-
-    // Insert iv at the start
-    output.insert(output.begin(), iv, iv + ivLength);
-
-    EVP_CIPHER_CTX_free(ctx);
-
-    return output;
+static std::basic_string_view<unsigned char> to_uchar(std::string_view sv)
+{
+  return {reinterpret_cast<const unsigned char*>(sv.data()), sv.size()};
 }
 
-template <typename T>
-T ChannelEncryption<T>::decrypt(const T& ciphertextAndIV,
-                                const std::string& pubKey) const {
-    const std::vector<uint8_t> pubKeyBytes = hexToBytes(pubKey);
-    const std::vector<uint8_t> sharedKey = calculateSharedSecret(pubKeyBytes);
+inline constexpr std::string_view salt{"ARQMA"};
 
-    // Initialise cipher
-    const EVP_CIPHER* cipher = EVP_aes_256_cbc();
-    const int ivLength = EVP_CIPHER_iv_length(cipher);
+std::vector<uint8_t> derive_symmetric_key(const x25519_seckey seckey, const x25519_pubkey pubkey) {
+  auto key = calculate_shared_secret(seckey, pubkey);
 
-    auto inPtr = reinterpret_cast<const unsigned char*>(&ciphertextAndIV[0]);
+  const auto* usalt = reinterpret_cast<const unsigned char*>(salt.data());
 
-    // Initialise cipher context
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (EVP_DecryptInit_ex(ctx, cipher, NULL, sharedKey.data(), inPtr) <= 0) {
-        throw std::runtime_error("Could not initialise decryption context");
-    }
+  crypto_auth_hmacsha256_state state;
 
-    int len;
-    size_t plaintextLength = 0;
-    const size_t ciphertextLength = ciphertextAndIV.size() - ivLength;
+  crypto_auth_hmacsha256_init(&state, usalt, salt.size());
+  crypto_auth_hmacsha256_update(&state, key.data(), key.size());
+  crypto_auth_hmacsha256_final(&state, key.data());
 
-    // Add some padding of 'blockSize' as upper limit
-    const int blockSize = EVP_CIPHER_CTX_block_size(ctx);
-    T output;
-    output.resize(ciphertextLength + blockSize);
-
-    auto outPtr = reinterpret_cast<unsigned char*>(&output[0]);
-
-    // Decrypt every full blocks
-    if (EVP_DecryptUpdate(ctx, outPtr, &len, inPtr + ivLength,
-                          ciphertextLength) <= 0) {
-        throw std::runtime_error("Could not initialise decryption context");
-    }
-    plaintextLength += len;
-
-    // Decrypt any remaining partial blocks
-    if (EVP_DecryptFinal_ex(ctx, outPtr + len, &len) <= 0) {
-        throw std::runtime_error("Could not finalise decryption");
-    }
-    plaintextLength += len;
-
-    // Remove excess bytes
-    output.resize(plaintextLength);
-
-    EVP_CIPHER_CTX_free(ctx);
-    return output;
+  return key;
 }
 
-// explicit template specialization
-template class ChannelEncryption<std::string>;
+struct aes256_evp_deleter {
+  void operator()(EVP_CIPHER_CTX* ptr) {
+    EVP_CIPHER_CTX_free(ptr);
+  }
+};
 
-template class ChannelEncryption<std::vector<uint8_t>>;
+using aes256cbc_ctx_ptr = std::unique_ptr<EVP_CIPHER_CTX, aes256_evp_deleter>;
+}
+
+std::string ChannelEncryption::encrypt(EncryptType type, std::string_view plaintext, const x25519_pubkey& pubkey) const
+{
+  switch (type)
+  {
+    case EncryptType::aes_gcm: return encrypt_gcm(plaintext, pubkey);
+    case EncryptType::aes_cbc: return encrypt_cbc(plaintext, pubkey);
+  }
+  throw std::runtime_error{"Invalid encryption type"};
+}
+
+std::string ChannelEncryption::decrypt(EncryptType type, std::string_view ciphertext, const x25519_pubkey& pubkey) const
+{
+  switch (type)
+  {
+    case EncryptType::aes_gcm: return decrypt_gcm(ciphertext, pubkey);
+    case EncryptType::aes_cbc: return decrypt_cbc(ciphertext, pubkey);
+  }
+  throw std::runtime_error{"Invalid decryption type"};
+}
+
+std::string ChannelEncryption::encrypt_cbc(std::string_view plaintext_, const x25519_pubkey& pubKey) const
+{
+  auto plaintext = to_uchar(plaintext_);
+
+  const auto sharedKey = calculate_shared_secret(private_key_, pubKey);
+
+  // Initialise cipher context
+  const EVP_CIPHER* cipher = EVP_aes_256_cbc();
+  aes256cbc_ctx_ptr ctx_ptr{EVP_CIPHER_CTX_new()};
+  auto* ctx = ctx_ptr.get();
+
+  std::string output;
+  const int ivLength = EVP_CIPHER_iv_length(cipher);
+  output.resize(ivLength + plaintext.size() + EVP_CIPHER_block_size(cipher));
+  auto* o = reinterpret_cast<unsigned char*>(output.data());
+  randombytes_buf(o, ivLength);
+  const auto* iv = o;
+  o += ivLength;
+
+  if (EVP_EncryptInit_ex(ctx, cipher, nullptr, sharedKey.data(), iv) <= 0)
+  {
+    throw std::runtime_error("Could not initialise encryption context");
+  }
+
+  int len;
+  // Encrypt every full blocks
+  if (EVP_EncryptUpdate(ctx, o, &len, p, plaintext.data(), plaintext.size()) <= 0)
+  {
+    throw std::runtime_error("Could not encrypt plaintext");
+  }
+  o += len;
+
+  // Encrypt any remaining partial blocks
+  if (EVP_EncryptFinal_ex(ctx, o, &len) <= 0)
+  {
+    throw std::runtime_error("Could not finalise encryption");
+  }
+  o += len;
+
+  // Remove excess buffer space
+  output.resize(reinterpret_cast<char*>(o) - output.data());
+
+  return output;
+}
+
+std::string ChannelEncryption::encrypt_gcm(std::string_view plaintext_, const x25519_pubkey& pubKey) const
+{
+  auto plaintext = to_uchar(plaintext_);
+
+  const auto derived_key = derive_symmetric_key(private_key_, pubKey);
+
+  std::string output;
+  output.resize(crypto_aead_aes256gcm_NPUBBYTES + plaintext.size() + crypto_aead_aes256gcm_ABYTES);
+  auto* nonce = reinterpret_cast<unsigned char*>(output.data());
+  randombytes_buf(nonce, crypto_aead_aes256gcm_NPUBBYTES);
+
+  auto* ciphertext = nonce + crypto_aead_aes256gcm_NPUBBYTES;
+  unsigned long long ciphertext_len;
+
+  crypto_aead_aes256gcm_encrypt(ciphertext, &ciphertext_len, plaintext.data(), plaintext.size(), nullptr, 0, nullptr, nonce, derived_key.data());
+
+  output.resize(crypto_aead_aes256gcm_NPUBBYTES + ciphertext_len);
+  return output;
+}
+
+std::string ChannelEncryption::decrypt_gcm(std::string_view ciphertext_, const x25519_pubkey& pubKey) const
+{
+  const auto derived_key = derive_symmetric_key(private_key_, pubKey);
+
+  auto ciphertext = to_uchar(ciphertext_);
+
+  auto nonce = ciphertext.substr(0, crypto_aead_aes256gcm_NPUBBYTES);
+  ciphertext.remove_prefix(nonce.size());
+
+  std::string output;
+  output.resize(ciphertext.size() - crypto_aead_aes256gcm_ABYTES);
+
+  auto outPtr = reinterpret_cast<unsigned char*>(&output[0]);
+  unsigned long long decrypted_len;
+
+  if (int result = crypto_aead_aes256gcm_decrypt(reinterpret_cast<unsigned char*>(output.data()), &decrypted_len, nullptr, ciphertext.data(), ciphertext.size(), nullptr, 0, nonce.data(), derived_key.data());
+    result != 0)
+  {
+    throw std::runtime_error("Could not decrypt (AES-GCM)");
+  }
+
+  assert(output.size() == decrypted_len);
+
+  return output;
+}
+
+std::string ChannelEncryption::decrypt_cbc(std::string_view ciphertext_, const x25519_pubkey& pubKey) const
+{
+  auto ciphertext = to_uchar(ciphertext_);
+
+  const auto sharedKey = calculate_shared_secret(private_key_, pubKey);
+
+  // Initialise cipher context
+  const EVP_CIPHER* cipher = EVP_aes_256_cbc();
+  aes256cbc_ctx_ptr ctx_ptr{EVP_CIPHER_CTX_new()};
+  auto* ctx = ctx_ptr.get();
+
+  auto iv = ciphertext.substr(0, EVP_CIPHER_iv_length(cipher));
+  ciphertext.remove_prefix(iv.size());
+
+  std::string output;
+  output.resize(ciphertext.size() + EVP_CIPHER_block_size(cipher));
+
+  // Initialise cipher context
+  if (EVP_DecryptInit_ex(ctx, cipher, nullptr, sharedKey.data(), inPtr) <= 0)
+  {
+    throw std::runtime_error("Could not decrypt block");
+  }
+
+  int len;
+  auto* o = reinterpret_cast<unsigned char*>(output.data());
+
+  // Decrypt every full blocks
+  if (EVP_DecryptUpdate(ctx, o, &len, ciphertext.data(), ciphertext.size()) <= 0)
+  {
+    throw std::runtime_error("Could not initialise decryption context");
+  }
+  o += len;
+
+  // Decrypt any remaining partial blocks
+  if (EVP_DecryptFinal_ex(ctx, o, &len) <= 0)
+  {
+    throw std::runtime_error("Could not finalise decryption");
+  }
+  o += len;
+
+  // Remove excess buffer space
+  output.resize(reinterpret_cast<char*>(o) - output.data());
+
+  return output;
+}
+
+}

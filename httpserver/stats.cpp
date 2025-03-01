@@ -1,5 +1,4 @@
 #include "stats.h"
-#include "../external/json.hpp"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -27,12 +26,9 @@ void all_stats_t::cleanup() {
 
     const auto cutoff = time(nullptr) - ROLLING_WINDOW_SIZE.count();
 
-    for (auto& kv : peer_report_) {
-
-        const sn_record_t& sn = kv.first;
-
-        cleanup_old(peer_report_[sn].storage_tests, cutoff);
-        cleanup_old(peer_report_[sn].blockchain_tests, cutoff);
+    for (auto& [kv, stats] : peer_report_)
+    {
+        cleanup_old(stats.storage_tests, cutoff);
     }
 
     /// updated stats for "previous period"

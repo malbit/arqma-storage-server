@@ -5,7 +5,7 @@
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "dev_sink.h"
 // clang-format on
-#include <boost/filesystem.hpp>
+#include <filesystem>
 
 #include <cstdlib>
 #include <fstream>
@@ -13,7 +13,7 @@
 
 namespace arqma {
 
-namespace fs = boost::filesystem;
+namespace fs = std::filesystem;
 
 bool parse_log_level(const std::string& input,
                      spdlog::level::level_enum& logLevel) {
@@ -39,7 +39,7 @@ void init_logging(const std::string& data_dir,
                   spdlog::level::level_enum log_level) {
 
     const std::string log_location =
-        (fs::path(data_dir) / "storage.logs").string();
+        (fs::u8path(data_dir) / "storage.logs").u8string();
     // Log to disk output stream
     const auto input = std::shared_ptr<std::ofstream>(
         new std::ofstream(log_location, std::ios::out | std::ios::app));
@@ -55,9 +55,12 @@ void init_logging(const std::string& data_dir,
 
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     console_sink->set_level(log_level);
+    console_sink->set_color_mode(spdlog::color_mode::always);
+
+    bool rotate_on_open = false;
 
     auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        log_location, LOG_FILE_SIZE_LIMIT, EXTRA_FILES);
+        log_location, LOG_FILE_SIZE_LIMIT, EXTRA_FILES, rotate_on_open);
     file_sink->set_level(log_level);
 
     auto developer_sink = std::make_shared<arqma::dev_sink_mt>();

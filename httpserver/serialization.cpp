@@ -8,9 +8,9 @@
 #include <boost/endian/conversion.hpp>
 #include <boost/format.hpp>
 
-using arqma::storage::Item;
-
 namespace arqma {
+
+using storage::Item;
 
 template <typename T>
 static T deserialize_integer(std::string::const_iterator& it) {
@@ -94,11 +94,11 @@ struct string_view {
     bool empty() { return it_end <= it; }
 };
 
-static boost::optional<std::string> deserialize_string(string_view& slice,
+static std::optional<std::string> deserialize_string(string_view& slice,
                                                        size_t len) {
 
     if (slice.size() < len) {
-        return boost::none;
+        return std::nullopt;
     }
 
     const auto res = std::string(slice.it, slice.it + len);
@@ -107,10 +107,10 @@ static boost::optional<std::string> deserialize_string(string_view& slice,
     return res;
 }
 
-static boost::optional<std::string> deserialize_string(string_view& slice) {
+static std::optional<std::string> deserialize_string(string_view& slice) {
 
     if (slice.size() < sizeof(size_t))
-        return boost::none;
+        return std::nullopt;
 
     const auto len =
         deserialize_integer<size_t>(slice.it); // already increments `it`!
@@ -118,10 +118,10 @@ static boost::optional<std::string> deserialize_string(string_view& slice) {
     return deserialize_string(slice, len);
 }
 
-static boost::optional<uint64_t> deserialize_uint64(string_view& slice) {
+static std::optional<uint64_t> deserialize_uint64(string_view& slice) {
 
     if (slice.size() < sizeof(uint64_t))
-        return boost::none;
+        return std::nullopt;
 
     const auto res = deserialize_integer<uint64_t>(slice.it);
 
@@ -181,7 +181,7 @@ std::vector<message_t> deserialize_messages(const std::string& blob) {
 
         ARQMA_LOG(trace, "pk: {}, msg: {}", *pk, *data);
 
-        result.push_back({*pk, *data, *hash, *ttl, *timestamp});
+        result.emplace_back(*pk, *data, *hash, *ttl, *timestamp);
     }
 
     ARQMA_LOG(trace, "=== END ===");

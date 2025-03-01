@@ -1,68 +1,60 @@
 #include "arqmad_key.h"
-#include "utils.hpp"
-extern "C" {
-#include "sodium/private/ed25519_ref10.h"
-}
-
-#include <boost/filesystem.hpp>
-#include <boost/format.hpp>
+#include <cstring>
+#include <type_traits>
 
 #include <sodium.h>
-
-#include <exception>
-#include <fstream>
-#include <iterator>
-
-namespace fs = boost::filesystem;
+#include <arqmamq/base32z.h>
+#include <arqmamq/hex.h>
 
 namespace arqma {
 
-private_key_t arqmadKeyFromHex(const std::string& private_key_hex) {
-  if (private_key_hex.size() != KEY_LENGTH * 2)
-    throw std::runtime_error("Arqmad key data is invalid: expected " + std::to_string(KEY_LENGTH) + " bytes, not "
-                             + std::to_string(private_key_hex.size()) + " bytes");
+namespace detail {
 
-  const auto bytes = util::hex_to_bytes(private_key_hex);
-  private_key_t private_key;
-  std::copy(bytes.begin(), bytes.end(), private_key.begin());
-
-  return private_key;
+void load_from_hex(void* buffer, size_t length, std::string_view hex)
+{
+  if (!arqmamq::is_hex(hex))
+    throw std::runtime_error{"Hex key data is invalid: data is not hex"};
+  if (hex.size() != 2*length)
+    throw std::runtime_error{"Hex key data is invalid: expected " + std::to_string(length) + " hex digits, received " + std::to_string(hex.size())};
+  arqmamq::from_hex(hex.begin(), hex.end(), reinterpret_cast<unsigned char*>(buffer));
 }
 
-private_key_ed25519_t private_key_ed25519_t::from_hex(const std::string& sc_hex) {
-  if (sc_hex.size() != private_key_ed25519_t::LENGTH * 2)
-    throw std::runtime_error("Arqmad key data is invalid. expected: " + std::to_string(private_key_ed25519_t::LENGTH)
-                             + " bytes, not: " + std::to_string(sc_hex.size()) + " bytes");
-
-  private_key_ed25519_t key;
-
-  const auto bytes = util::hex_to_bytes(sc_hex);
-  std::copy(bytes.begin(), bytes.end(), key.data.begin());
-
-  return key;
+void load_from_bytes(void* buffer, size_t length, std::string_view bytes)
+{
+  if (bytes.size() != length)
+    throw std::runtime_error{"Key data is invalid: expected " + std::to_string(length) + " bytes, received " + std::to_string(bytes.size())};
+  std::memmove(buffer, bytes.data(), length);
 }
 
-public_key_t derive_pubkey_legacy(const private_key_t& private_key) {
-  ge25519_p3 A;
-  ge25519_scalarmult_base(&A, private_key.data());
-  public_key_t publicKey;
-  ge25519_p3_tobytes(publicKey.data(), &A);
-
-  return publicKey;
+std::string to_hex(const unsigned char* buffer, size_t length)
+{
+  return arqmamq::to_hex(buffer, buffer + length);
 }
 
-public_key_t derive_pubkey_x25519(const private_key_t& seckey) {
-  public_key_t pubkey;
-  crypto_scalarmult_curve25519_base(pubkey.data(), seckey.data());
-
-  return pubkey;
+std::string ed25519_pubkey::snode_address() const
+{
+  auto addr = arqmamq::to_base32z(begin(), end());
+  addr += ".snode";
+  return addr;
 }
 
-public_key_t derive_pubkey_ed25519(const private_key_ed25519_t& seckey) {
-  public_key_t pubkey;
-  crypto_sign_ed25519_sk_to_pk(pubkey.data(), seckey.data.data());
-
-  return pubkey;
-}
+legacy_pubkey legacy_seckey::pubkey() const
+{
+  legacy_pubkey pk;
+  crypto_scalarmult_ed25519_base_noclamp(pk.data(), data());
+  return pk;
+};
+ed25519_pubkey ed25519_seckey::pubkey() const
+{
+  ed25519_pubkey pk;
+  crypto_sign_ed25519_sk_to_pk(pk.data(), data());
+  return pk;
+};
+x25519_pubkey x25519_seckey::pubkey() const
+{
+  x25519_pubkey pk;
+  crypto_scalarmult_curve25519_base(pk.data(), data());
+  return pk;
+};
 
 } // namespace arqma

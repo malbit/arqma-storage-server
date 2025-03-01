@@ -3,12 +3,11 @@
 #include "utils.hpp"
 
 #include "sqlite3.h"
+#include <cstdlib>
 #include <exception>
 
 namespace arqma {
 using namespace storage;
-
-constexpr auto CLEANUP_PERIOD = std::chrono::seconds(10);
 
 Database::~Database() {
     sqlite3_finalize(save_stmt);
@@ -18,11 +17,10 @@ Database::~Database() {
     sqlite3_finalize(get_stmt);
     sqlite3_finalize(delete_expired_stmt);
     sqlite3_close(db);
-    std::cerr << "~Database\n";
 }
 
-Database::Database(boost::asio::io_context& ioc, const std::string& db_path)
-    : cleanup_timer_(ioc) {
+Database::Database(boost::asio::io_context& ioc, const std::string& db_path, std::chrono::milliseconds cleanup_period)
+    : cleanup_period(cleanup_period), cleanup_timer_(ioc) {
     open_and_prepare(db_path);
 
     perform_cleanup();
@@ -53,7 +51,7 @@ void Database::perform_cleanup() {
         fprintf(stderr, "sql error: unexpected value from sqlite3_reset");
     }
 
-    cleanup_timer_.expires_after(CLEANUP_PERIOD);
+    cleanup_timer_.expires_after(this->cleanup_period);
     cleanup_timer_.async_wait(std::bind(&Database::perform_cleanup, this));
 }
 
@@ -66,6 +64,85 @@ sqlite3_stmt* Database::prepare_statement(const std::string& query) {
         printf("ERROR: sql error: %s", pzTest);
     }
     return stmt;
+}
+
+constexpr int64_t DB_PAGE_SIZE = 4096;
+constexpr int64_t DB_SIZE_LIMIT = int64_t(3584) * 1024 * 1024;
+constexpr int64_t DB_PAGE_LIMIT = DB_SIZE_LIMIT / DB_PAGE_SIZE;
+
+static void set_page_count(sqlite3* db)
+{
+  char* errMsg = nullptr;
+
+  auto cb = [](void* a_param, int argc, char** argv, char** column) -> int {
+    if (argc == 0)
+    {
+      ARQMA_LOG(error, "Failed to set the page count limit");
+      return 0;
+    }
+
+    int res = strtol(argv[0], NULL, 10);
+
+    if (res == 0)
+    {
+      ARQMA_LOG(error, "Failed to convert page limit ({}) to a number", argv[0]);
+      return 0;
+    }
+
+    ARQMA_LOG(info, "DB page limit is set to: {}", res);
+
+    return 0;
+  };
+
+  int rc = sqlite3_exec(db, fmt::format("PRAGMA MAX_PAGE_COUNT = {};", DB_PAGE_LIMIT).c_str(), cb, nullptr, &errMsg);
+
+  if (rc)
+  {
+    if (errMsg)
+    {
+      ARQMA_LOG(error, "Query error: {}", errMsg);
+    }
+  }
+}
+
+static void check_page_size(sqlite3* db)
+{
+  char* errMsg = nullptr;
+
+  auto cb = [](void* a_param, int argc, char** argv, char** column) -> int {
+    if (argc == 0)
+    {
+      ARQMA_LOG(error, "Could not get DB page size");
+    }
+
+    int res = strtol(argv[0], NULL, 10);
+
+    if (res == 0)
+    {
+      ARQMA_LOG(error, "Failed to convert page size ({}) to a number", argv[0]);
+      return 0;
+    }
+
+    if (res != DB_PAGE_SIZE)
+    {
+      ARQMA_LOG(warn, "Unexpected DB page size: {}", res);
+    }
+    else
+    {
+      ARQMA_LOG(info, "DB page size: {}", res);
+    }
+
+    return 0;
+  };
+
+  int rc = sqlite3_exec(db, "PRAGMA page_size;", cb, nullptr, &errMsg);
+  if (rc)
+  {
+    if (errMsg)
+    {
+      ARQMA_LOG(error, "Query error: {}", errMsg);
+    }
+  }
 }
 
 void Database::open_and_prepare(const std::string& db_path) {
@@ -81,6 +158,9 @@ void Database::open_and_prepare(const std::string& db_path) {
         // throw?
         return;
     }
+
+    check_page_size(db);
+    set_page_size(db);
 
     const char* create_table_query =
         "CREATE TABLE IF NOT EXISTS `Data`("
@@ -293,6 +373,9 @@ bool Database::store(const std::string& hash, const std::string& pubKey,
     sqlite3_bind_blob(stmt, 6, nonce.data(), nonce.size(), SQLITE_STATIC);
     sqlite3_bind_blob(stmt, 7, bytes.data(), bytes.size(), SQLITE_STATIC);
 
+    static int db_full_counter = 0;
+    constexpr int DB_FULL_FREQUENCY = 100;
+
     bool result = false;
     int rc;
     while (true) {
@@ -304,6 +387,12 @@ bool Database::store(const std::string& hash, const std::string& pubKey,
         } else if (rc == SQLITE_DONE) {
             result = true;
             break;
+        } else if (rc == SQLITE_FULL) {
+            if (db_full_counter % DB_FULL_FREQUENCY == 0) {
+                ARQMA_LOG(error, "Failed to store message: database is full");
+                ++db_full_counter;
+            }
+            break;
         } else {
             ARQMA_LOG(critical,
                       "Could not execute `store` db statement, ec: {}", rc);
@@ -312,7 +401,7 @@ bool Database::store(const std::string& hash, const std::string& pubKey,
     }
 
     rc = sqlite3_reset(stmt);
-    if (rc != SQLITE_OK && rc != SQLITE_CONSTRAINT) {
+    if (rc != SQLITE_OK && rc != SQLITE_CONSTRAINT && rc != SQLITE_FULL) {
         ARQMA_LOG(critical, "sqlite reset error: [{}], {}", rc,
                   sqlite3_errmsg(db));
     }
