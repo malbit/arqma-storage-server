@@ -39,8 +39,7 @@ inline bool starts_with(std::string_view str, std::string_view prefix)
 }
 
 template <typename It>
-std::string join(std::string_view delimiter, It begin, It end)
-{
+std::string join(std::string_view delimiter, It begin, It end) {
   std::ostringstream o;
   if (begin != end)
     o << *begin++;

@@ -14,7 +14,7 @@
               ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_2)              \
     (__VA_ARGS__)
 
-#definde ARQMA_LOG_ENABLED(LVL) spdlog::get("arqma_logger")->should_log(spdlog::level::LVL)
+#define ARQMA_LOG_ENABLED(LVL) spdlog::get("arqma_logger")->should_log(spdlog::level::LVL)
 
 namespace arqma {
 using LogLevelPair = std::pair<std::string, spdlog::level::level_enum>;

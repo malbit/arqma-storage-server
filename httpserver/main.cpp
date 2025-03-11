@@ -14,7 +14,7 @@
 #include "arqmq_server.h"
 #include "request_handler.h"
 
-#include <sodium.h>
+#include <sodium/core.h>
 #include <arqmamq/arqmamq.h>
 #include <arqmamq/hex.h>
 
@@ -32,8 +32,6 @@ extern "C" {
 #endif
 }
 namespace fs = std::filesystem;
-
-constexpr int EXIT_INVALID_PORT = 2;
 
 int main(int argc, char* argv[]) {
 
@@ -109,12 +107,6 @@ int main(int argc, char* argv[]) {
     if (sodium_init() != 0) {
         ARQMA_LOG(error, "Could not initialize libsodium");
         return EXIT_FAILURE;
-    }
-
-    if (crypto_aead_aes256gcm_is_available() == 0)
-    {
-      ARQMA_LOG(error, "AES-256-GCM is not available on this CPU");
-      return EXIT_FAILURE;
     }
 
     {

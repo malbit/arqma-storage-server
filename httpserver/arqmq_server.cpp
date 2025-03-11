@@ -3,6 +3,7 @@
 #include "arqma_common.h"
 #include "arqma_logger.h"
 #include "arqmad_key.h"
+#include "channel_encryption.hpp"
 #include "arqmamq/connection.h"
 #include "arqmamq/arqmamq.h"
 #include "service_node.h"
@@ -90,11 +91,16 @@ void ArqmamqServer::handle_sn_proxy_exit(arqmamq::Message& message)
     });
 }
 
-void ArqmamqServer::handle_onion_request(arqmamq::Message& message, bool v2)
+void ArqmamqServer::handle_ping(arqmamq::Message& message)
 {
-    ARQMA_LOG(debug, "Got an onion request over ARQMQ");
+  ARQMA_LOG(debug, "Remote pinged me");
+  service_node_->update_last_ping(ReachType::AMQ);
+  message.send_reply("pong");
+}
 
-    auto on_response = [send=message.send_later()](arqma::Response res)
+void ArqmamqServer::handle_onion_request(std::string_view payload, OnionRequestMetadata&& data, arqmamq::Message::DefferedSend send)
+{
+    data.cb = [send](arqma::Response res)
     {
       if (ARQMA_LOG_ENABLED(trace))
         ARQMA_LOG(trace, "on response: {}...", to_string(res).substr(0, 100));
@@ -102,26 +108,54 @@ void ArqmamqServer::handle_onion_request(arqmamq::Message& message, bool v2)
       send.reply(std::to_string(static_cast<int>(res.status())), std::move(res).message());
     };
 
-    if (message.data.size() == 1 && message.data[0] == "ping")
-    {
-      ARQMA_LOG(info, "Remote pinged me");
-      service_node_->update_last_ping(true);
-      on_response(arqma::Response{Status::OK, "pong"});
-      return;
-    }
+    if (data.hop_no > MAX_ONION_HOPS)
+      return data.cb({Status::BAD_REQUEST, "onion request max path length exceeded"});
 
-    if (message.data.size() != 2)
-    {
-        ARQMA_LOG(error, "Expected 2 message parts, got {}", message.data.size());
-        on_response(arqma::Response{Status::BAD_REQUEST, "Incorrect number of messages"});
-        return;
-    }
+    request_handler_->process_onion_req(rayload, std::move(data));
+}
 
-    auto eph_key = extract_x25519_from_hex(message.data[0]);
-    if (!eph_key) return;
-    const auto& ciphertext = message.data[1];
+void ArqmamqServer::handle_onion_request(arqmamq::Message& message)
+{
+  std::pair<std::string_view, OnionRequestMetadata> data;
+  try
+  {
+    if (message.data.size() != 1)
+      thrown std::runtime_error{"expected 1 part, got " + std::to_string(message.data.size())};
 
-    request_handler_->process_onion_req(std::string(ciphertext), *eph_key, on_response, v2);
+    data = decode_onion_data(message.data[0]);
+  }
+  catch (const std::exception& e)
+  {
+    auto msg = "Invalid internal onion request: "s + e.what();
+    ARQMA_LOG(error, "{}", msg);
+    message.send_reply(std::to_string(static_cast<int>(Status::BAD_REQUEST)), msg);
+    return;
+  }
+
+  handle_onion_request(data.first, std::move(data.second), message.send_later());
+}
+
+void ArqmamqServer::handle_onion_req_v2(arqmamq::Message& message)
+{
+  ARQMA_LOG(debug, "Got v2 onion request over ArqmaMQ");
+
+  const int bad_code = static_casr<int>(Status::BAD_REQUEST);
+  if (message.data.size() != 2)
+  {
+    ARQMA_LOG(error, "Expected 2 message parts, got {}", message.data.size());
+    message.send_reply(std::to_string(bad_code), "Incorrect number of onion request message parts");
+    return;
+  }
+
+  auto eph_key = extract_x25519_from_hex(message.data[0]);
+  if (!eph_key)
+  {
+    ARQMA_LOG(error, "no ephemeral key in arqmq onion request");
+    message.send_reply(std::to_string(bad_code), "Missing ephemeral key");
+    return;
+  }
+
+  handle_onion_request(message.data[1], {*eph_key, nullptr, 1, EncryptType::aes_gcm}, message.send_later());
 }
 
 void ArqmamqServer::handle_get_logs(arqmamq::Message& message)
@@ -196,8 +230,8 @@ ArqmamqServer::ArqmamqServer(
   amq_.add_category("sn", arqmamq::Access{arqmamq::AuthLevel::none, true, false})
       .add_request_command("data", [this](auto& m) { this->handle_sn_data(m); })
       .add_request_command("proxy_exit", [this](auto& m) { this->handle_sn_proxy_exit(m); })
-      .add_request_command("onion_req", [this](auto& m) { this->handle_onion_request(m, false); })
-      .add_request_command("onion_req_v2", [this](auto& m) { this->handle_onion_request(m, true); });
+      .add_request_command("ping", [this](auto& m) { handle_ping(m); })
+      .add_request_command("onion_request", [this](auto& m) { handle_onion_request(m); });
 
   amq_.add_category("service", arqmamq::AuthLevel::admin)
       .add_request_command("get_stats", [this](auto& m) { this->handle_get_stats(m); })
@@ -241,6 +275,42 @@ void ArqmamqServer::init(ServiceNode* sn, RequestHandler* rh, arqmamq::address a
   request_handler_ = rh;
   amq_.start();
   connect_arqmad(arqmad_rpc);
+}
+
+std::string ArqmamqServer::encode_onion_data(std::string_view payload, const OnionRequestMetadata& data)
+{
+  return arqmamq::bt_serialize<arqmqmq::bt_dict>({
+      {"data", payload},
+      {"enc_type", to_string(data.enc_type)},
+      {"ephemeral_key", data.ephem_key.view()},
+      {"hop_no", data.hop_no},
+  });
+}
+
+std::pair<std::string_view, OnionRequestMetadata> ArqmamqServer::decode_onion_data(std::string_view data)
+{
+  std::pair<std::string_view, OnionRequestMetadata> result;
+  auto& [payload, meta] = result;
+  arqmamq::bt_dict_consumer d{data};
+  if (!d.skip_until("data"))
+    throw std::runtime_error{"required data payload not found"};
+  payload = d.consume_string_view();
+
+  if (d.skip_until("enc_type"))
+    meta.enc_type = parse_enc_type(d.consume_string_view());
+  else
+    meta.enc_type = EncryptType::aes_gcm;
+
+  if (!d.skip_until("ephemeral_key"))
+    throw std::runtime_error{"ephemeral key not found"};
+  meta.ephem_key = x25519_pubkey::from_bytes(d.consume_string_view());
+
+  if (d.skip_until("hop_no"))
+    meta.hop_no = d.consume_integer<int>();
+  if (meta.hop_no < 1)
+    meta.hop_no = 1;
+
+  return result;
 }
 
 } // namespace arqma

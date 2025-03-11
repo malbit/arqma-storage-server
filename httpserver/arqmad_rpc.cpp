@@ -70,7 +70,7 @@ arqmad_seckeys get_sn_privkeys(std::string_view arqmad_rpc_address)
     {
       return fut.get();
     }
-    catch (std::exception& e)
+    catch (const std::exception& e)
     {
       ARQMA_LOG(critical, "Error retrieving private keys from arqmad: {}; retrying", e.what());
     }

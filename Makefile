@@ -20,7 +20,7 @@ else
 	CMAKE := cmake -G$(GEN)
 endif
 
-BUILD_STATIC ?= ON
+BUILD_STATIC ?= OFF
 
 MKDIR := mkdir -p $(BUILD_DIR) && cd $(BUILD_DIR)
 

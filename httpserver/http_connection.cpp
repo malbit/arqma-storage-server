@@ -84,8 +84,7 @@ void make_http_request(boost::asio::io_context& ioc,
         if (ec)
         {
           ARQMA_LOG(error, "DNS resolution error for {}: {}", address, ec.message());
-          cb({SnodeError::ERROR_OTHER});
-          return;
+          return cb({SnodeError::ERROR_OTHER});
         }
 
         tcp::endpoint endpoint;
@@ -107,8 +106,7 @@ void make_http_request(boost::asio::io_context& ioc,
         if (!resolved)
         {
           ARQMA_LOG(error, "[HTTP] DNS resolution error for {}", address);
-          cb({SnodeError::ERROR_OTHER});
-          return;
+          return cb({SnodeError::ERROR_OTHER});
         }
 
         endpoint.port(port);
@@ -465,29 +463,41 @@ void connection_t::process_onion_req_v2()
 
   const request_t& req = this->request_.get();
   delay_response_ = true;
-  auto on_response = [wself = weak_from_this()](arqma::Response res)
-  {
-    ARQMA_LOG(debug, "Got an onion response as guard node");
 
-    auto self = wself.lock();
-    if (!self)
+  OnionRequestMetadata data{
+    x25519_pubkey{},
+    [wself = weak_from_this()](arqma::Response res)
     {
-      ARQMA_LOG(debug, "Connection is no longer valid, dropping onion response");
-      return;
-    }
+      ARQMA_LOG(debug, "Got an onion response as edge node");
 
-    self->body_stream_ << res.message();
-    self->response_.result(static_cast<int>(res.status()));
-    self->write_response();
+      auto self = wself.lock();
+      if (!self)
+      {
+        ARQMA_LOG(debug, "Connection is no longer valid. Dropping");
+        return;
+      }
+
+      self->body_stream_ << res.message();
+      self->response_.result(static_cast<int>(res.status()));
+      self->write_response();
+    },
+    0,
+    EncryptType::aes_gcm,
   };
 
   try
   {
     auto [ciphertext, json_req] = parse_combined_payload(req.body());
-    auto ephem_key = extract_x25519_from_hex(json_req.at("ephemeral_key").get_ref<const std::string&>());
+    data.ephem_key = extract_x25519_from_hex(json_req.at("ephemeral_key").get_ref<const std::string&>());
+
+    if (auto it = json_req.find("enc_type"); it != json_req.end())
+      data.enc_type = parce_enc_type(it->get_ref<const std::string&>());
+
+    if (auto it = json_req.find("hop_no"); it != json_req.end())
+      data.hop_no = std::max(0, it->get<int>());
 
     service_node_.record_onion_request();
-    request_handler_.process_onion_req(std::move(ciphertext), ephem_key, on_response, true);
+    request_handler_.process_onion_req(ciphertext, std::move(data));
   }
   catch (const std::exception& e)
   {
@@ -524,7 +534,6 @@ void connection_t::process_swarm_req(std::string_view target)
     if (body == nlohmann::detail::value_t::discarded) {
             ARQMA_LOG(debug, "Bad snode test request: invalid json");
             body_stream_ << "invalid json\n";
-            response_.result(http::status::bad_request);
             return;
     }
 
@@ -537,7 +546,6 @@ void connection_t::process_swarm_req(std::string_view target)
     } catch (...) {
             this->body_stream_
                 << "Bad snode test request: missing fields in json";
-            response_.result(http::status::bad_request);
             ARQMA_LOG(debug, "Bad snode test request: missing fields in json");
             return;
     }
@@ -557,7 +565,7 @@ void connection_t::process_swarm_req(std::string_view target)
     process_storage_test_req(blk_height, tester_pk, msg_hash);
   } else if (target == "/swarms/ping_test/v1") {
         ARQMA_LOG(trace, "Received ping_test");
-        service_node_.update_last_ping(false);
+        service_node_.update_last_ping(ReachType::HTTPS);
         response_.result(http::status::ok);
   }
 }
@@ -626,7 +634,7 @@ void connection_t::process_request() {
 
             try {
                 process_client_req_rate_limited();
-            } catch (std::exception& e) {
+            } catch (const std::exception& e) {
                 this->body_stream_ << fmt::format(
                     "Exception caught while processing client request: {}",
                     e.what());
@@ -716,8 +724,6 @@ template <typename... Args>
 bool connection_t::parse_header(const char* first, Args... args) {
     return parse_header(first) && parse_header(args...);
 }
-
-constexpr auto LONG_POLL_TIMEOUT = std::chrono::milliseconds(20000);
 
 void connection_t::process_client_req_rate_limited()
 {

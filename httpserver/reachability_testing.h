@@ -33,6 +33,8 @@ struct incoming_test_state {
 
 class Swarm;
 
+enum class ReachType { HTTPS, AMQ };
+
 class reachability_testing {
   public:
     inline static constexpr auto TESTING_TIMER_INTERVAL = 50ms;
@@ -60,7 +62,7 @@ class reachability_testing {
     std::optional<sn_record_t> next_random(const Swarm& swarm, const time_point_t& now = std::chrono::steady_clock::now(), bool requeue = true);
     std::vector<std::pair<sn_record_t, int>> get_failing(const Swarm& swarm, const time_point_t& now = std::chrono::steady_clock::now());
     void add_failing_node(const legacy_pubkey& pk, int previous_failures = 0);
-    void incoming_ping(bool amq, const time_point_t& now = std::chrono::steady_clock::now());
+    void incoming_ping(ReachType type, const time_point_t& now = std::chrono::steady_clock::now());
     void check_incoming_tests(const time_point_t& now = std::chrono::steady_clock::now());
 };
 

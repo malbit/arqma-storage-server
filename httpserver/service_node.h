@@ -35,6 +35,7 @@ struct Item;
 struct sn_response_t;
 
 class ArqmamqServer;
+struct OnionRequestMetadata;
 
 namespace ss_client
 {
@@ -65,7 +66,7 @@ class ServiceNode {
     boost::asio::io_context& ioc_;
 
     bool syncing_ = true;
-    bool active_ = true;
+    bool active_ = false;
     bool got_first_response_ = false;
     int hardfork_ = 0;
     uint64_t block_height_ = 0;
@@ -81,10 +82,6 @@ class ServiceNode {
 
     /// Cache for block_height/block_hash mapping
     boost::circular_buffer<std::pair<uint64_t, std::string>> block_hashes_cache_{BLOCK_HASH_CACHE_SIZE};
-    boost::asio::steady_timer arqmad_ping_timer_;
-    boost::asio::steady_timer stats_cleanup_timer_;
-    boost::asio::steady_timer peer_ping_timer_;
-    boost::asio::steady_timer relay_timer_;
 
     ArqmamqServer& arqmq_server_;
 
@@ -127,14 +124,11 @@ class ServiceNode {
     void relay_messages(const std::vector<Message>& messages,
                         const std::vector<sn_record_t>& snodes) const;
 
-    void cleanup_timer_tick();
-
-    void ping_peers_tick();
+    void ping_peers();
 
     void relay_buffered_messages();
 
-    /// Ping the storage server periodically as required for uptime proofs
-    void arqmad_ping_timer_tick();
+    void arqmad_ping();
 
     /// Return tester/testee pair based on block_height
     bool derive_tester_testee(uint64_t block_height, sn_record_t& tester,
@@ -167,12 +161,11 @@ class ServiceNode {
                 const bool force_start);
 
     const sn_record_t& own_address() { return our_address_; }
-    void update_last_ping(bool arqmq);
+    void update_last_ping(ReachType type);
     void record_proxy_request();
     void record_onion_request();
 
-    void send_onion_to_sn_v1(const sn_record_t& sn, const std::string& payload, const std::string& eph_key, ss_client::Callback cb) const;
-    void send_onion_to_sn_v2(const sn_record_t& sn, const std::string& payload, const std::string& eph_key, ss_clinet::Callback cb) const;
+    void send_onion_to_sn(const sn_record_t& sn, std::string_view payload, OnionRequestMetadata&& data, ss_client::Callback cb) const;
 
     void send_to_sn(const sn_record_t& sn, ss_client::ReqMethod method, ss_client::Request req, ss_client::Callback cb) const;
 

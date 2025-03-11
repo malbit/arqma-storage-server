@@ -35,7 +35,7 @@ struct block_update_t {
 
 void debug_print(std::ostream& os, const block_update_t& bu);
 
-swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms, const user_pubkey_t& pk);
+const SwarmInfo& get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms, const user_pubkey_t& pk);
 
 std::pair<int, int> count_missing_data(const block_update_t& bu);
 

@@ -4,7 +4,3 @@
 [submodule "vendors/nlohmann_json"]
 	path = vendors/nlohmann_json
 	url = https://github.com/nlohmann/json.git
-[submodule "vendors/arqmamq"]
-  path = vendors/arqmamq
-  url = git@github.com:malbit/arqma-mq.git
-  branch = dev

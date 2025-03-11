@@ -5,8 +5,9 @@
 #include <boost/endian/conversion.hpp>
 #include <nlohmann/json.hpp>
 #include <arqmamq/base64.h>
+#include <arqmamq/variant.h>
 #include "onion_processing.h"
-#include <arqmamq/base64.h>
+#include "utils.hpp"
 #include <charconv>
 #include <variant>
 
@@ -14,74 +15,75 @@ using nlohmann::json;
 
 namespace arqma {
 
-auto process_inner_request(const CiphertextPlusJson& parsed, std::string plaintext) -> ParsedInfo
+auto process_inner_request(std::string plaintext) -> ParsedInfo
 {
+  ParsedInfo ret;
   try
   {
-    const json inner_json = json::parse(parsed.json, nullptr, true);
-    if (inner_json.find("headers") != inner_json.end())
+    auto [ciphertext, inner_json] = parse_combined_payload(plaintext);
+
+    if (inner_json.count("headers"))
     {
-      ARQMA_LOG(trace, "Found body: <{}>", parsed.ciphertext);
-      return FinalDestinationInfo{parsed.ciphertext};
+      ARQMA_LOG(trace, "Found body: <{}>", ciphertext);
+      auto& [body, json, b64] = ret.emplace<FinalDestinationInfo>();
+      body = std::move(ciphertext);
+      if (auto it = inner_json.find("json"); it != inner_json.end())
+        json = it->get<bool>();
+      if (auto it = inner_json.find("base64"); it != inner_json.end())
+        b64 = it->get<bool>();
     }
-    else if (inner_json.find("host") != inner_json.end())
+    else if (auto it = inner_json.find("host"); it != inner_json.end())
     {
-      const auto& host = inner_json.at("host").get_ref<const std::string&>();
-      const auto& target = inner_json.at("target").get_ref<const std::string&>();
-      std::string protocol = "https";
-      uint16_t port = 443;
+      auto& [payload, host, port, protocol, target] = ret.emplace<RelayToServerInfo>();
+      payload = std::move(plaintext);
+      host = it->get<std::string>();
+      target = inner_json.at("target").get<std::string>();
 
-      if (inner_json.find("port") != inner_json.end())
-      {
-        port = inner_json.at("port").get<uint16_t>();
-      }
+      if (auto p = inner_json.find("port"); p != inner_json.end())
+        port = p->get<uint16_t>();
+      else
+        port = 443;
 
-      if (inner_json.find("protocol") != inner_json.end())
-      {
-        protocol = inner_json.at("protocol").get_ref<const std::string&>();
-      }
-
-      return RelayToServerInfo{plaintext, host, port, protocol, target};
+      if (auto p = inner_json.find("protocol"); p != inner_json.end())
+        protocol = p->get<uint16_t>();
+      else
+        protocol = "https";
     }
     else
     {
-      const auto& dest = ed25519_pubkey::from_hex(inner_json.at("destination").get_ref<const std::string&>());
-      const auto& ekey = inner_json.at("ephemeral_key").get_ref<const std::string&>();
-
-      return RelayToNodeInfo{parsed.ciphertext, ekey, dest};
+      auto& [ctext, eph_key, next] = ret.emplace<RelayToNodeInfo>();
+      ctext = std::move(ciphertext);
+      next = ed25519_pubkey::from_hex(inner_json.at("destination").get_ref<const std::string&>());
+      eph_key = x25519_pubkey::from_hex(inner_json.at("ephemeral_key").get_ref<const std::string&>());
     }
   }
-  catch (std::exception& e)
+  catch (const std::exception& e)
   {
     ARQMA_LOG(debug, "Error parsing inner JSON in onion request: {}", e.what());
-    return ProcessCiphertextError::INVALID_JSON;
+    ret = ProcessCiphertextError::INVALID_JSON;
   }
+
+  return ret;
 }
 
-static auto process_ciphertext_v2(const ChannelEncryption& decryptor, std::string_view ciphertext, const x25519_pubkey& ephem_key) -> ParsedInfo
+static auto process_ciphertext_v2(const ChannelEncryption& decryptor, std::string_view ciphertext, const x25519_pubkey& ephem_key, EncryptType enc_type) -> ParsedInfo
 {
-  std::string plaintext;
+  std:optional<std::string> plaintext;
 
   try
   {
-    plaintext = decryptor.decrypt_gcm(ciphertext, ephem_key);
+    plaintext = decryptor.decrypt(enc_type, ciphertext, ephem_key);
   }
-  catch (std::exception& e)
+  catch (const std::exception& e)
   {
     ARQMA_LOG(debug, "Error decrypting an onion request: {}", e.what());
-    return ProcessCiphertextError::INVALID_CIPHERTEXT;
   }
+  if (!plaintext)
+    return ProcessCiphertextError::INVALID_CIPHERTEXT;
 
   ARQMA_LOG(debug, "onion request decrypted: (len: {})", plaintext.size());
 
-  const auto parsed = parse_combined_payload(plaintext);
-
-  return process_inner_requesrt(parsed, plaintext);
-}
-
-static auto gateway_timeout() -> arqma::Response
-{
-  return arqma::Response{Status::GATEWAY_TIMEOUT, "Request time out"};
+  return process_inner_requesrt(std::move(*plaintext));
 }
 
 static auto make_status(std::string_view status) -> arqma::Status
@@ -109,143 +111,97 @@ static auto make_status(std::string_view status) -> arqma::Status
   }
 }
 
-static void relay_to_node(const ServiceNode& service_node, const RelayToNodeInfo& info, std::function<void(arqma::Response)> cb, bool v2)
+void RequestHandler::process_onion_req(std::string_view ciphertext, OnionRequestMetadata data)
 {
-  const auto& dest = info.next_node;
-  const auto& payload = info.ciphertext;
-  const auto& ekey = info.ephemeral_key;
+  if (!service_node_.snode_ready())
+  {
+    auto msg = fmt::format("Snode not ready: {}", service_node_.own_address().pubkey_ed25519);
+    return data.cb({Status::SERVICE_UNAVAILABLE, std::move(msg)});
+  }
 
-  auto dest_node = service_node.find_node(dest);
+  ARQMA_LOG(debug, "process_onion_req");
 
+  var::visit([&](auto&& x) { process_onion_req(std::move(x), std::move(data)); },
+      process_ciphertext_v2(channel_cipher_, ciphertext, data.ephem_key, data.enc_type));
+}
+
+void RequestHandler::process_onion_req(FinalDestinationInfo&& info, OnionRequestMetadata&& data)
+{
+  ARQMA_LOG(debug, "We are the final destination in the onion request!");
+
+  process_onion_exit(info.body, [this, data = std::move(data), json = info.json, b64 = info.base64](arqma::Response res)
+      { data.cb(wrap_proxy_response(std::move(res), data.ephem_key, data.enc_type, json, b64));
+  });
+}
+
+void RequestHandler::process_onion_req(RelayToNodeInfo&& info, OnionRequestMetadata&& data)
+{
+  auto& [payload, ekey, dest] = info;
+
+  auto dest_node = service_node_.find_node(dest);
   if (!dest_node)
   {
     auto msg = fmt::format("Next node not found: {}", dest);
     ARQMA_LOG(warn, "{}", msg);
-    auto res = arqma::Response{Status::BAD_GATEWAY, std::move(msg)};
-    cb(std::move(res));
-    return;
+    return data.cb({Status::BAD_GATEWAY, std::move(msg)});
   }
 
-  nlohmann::json req_body;
-
-  req_body["ciphertext"] = payload;
-  req_body["ephemeral_key"] = ekey;
-
-  auto on_response = [cb, &service_node](bool success, std::vector<std::string> data) {
+  auto on_response = [cb=std::move(data.cb)](bool success, std::vector<std::string> data) {
     if (!success)
     {
       ARQMA_LOG(debug, "[Onion request] Request time out");
-      cb(gateway_timeout());
-      return;
+      return cb({Status::GATEWAY_TIMEOUT, "Request time out"});
     }
 
     if (data.size() != 2)
     {
       ARQMA_LOG(debug, "[Onion request] Incorrect number of messages: {}", data.size());
-      cb(arqma::Response{Status::INTERNAL_SERVER_ERROR, "Incorrect number of messages from gateway"});
-      return;
+      return cb({Status::INTERNAL_SERVER_ERROR, "Incorrect number of messages from gateway"});
     }
 
     if (data[0] != "200")
-    {
       ARQMA_LOG(debug, "Onion request relay failed with: {}", data[1]);
-    }
-    cb(arqma::Reasponse{make_status(data[0]), std::move(data[1])});
+    cb({make_status(data[0]), std::move(data[1])});
   };
 
-  ARQMA_LOG(debug, "send_onion_to_sn, sn: {} reqidx: {}", dest_node->pubkey_legacy);
+  ARQMA_LOG(debug, "send_onion_to_sn, sn: {}", dest_node->pubkey_legacy);
 
-  if (v2)
-  {
-    service_node.send_onion_to_sn_v2(*dest_node, payload, ekey, on_response);
-  }
-  else
-  {
-    service_node.send_onion_to_sn_v1(*dest_node, payload, ekey, on_response);
-  }
+  data.ephem_key = ekey;
+  service_node_.send_onion_to_sn(*dest_node, std::move(payload), std::move(data), std::move(on_response));
 }
 
-void RequestHandler::process_onion_req(std::string_view ciphertext, const x25519_pubkey& ephem_key, std::function<void(arqma::Response)> cb, bool v2)
+bool is_server_url_allowed(std::string_view url)
 {
-  if (!service_node_.snode_ready())
-  {
-    auto msg = fmt::format("Snode not ready: {}", service_node_.own_address().pubkey_ed25519);
-    cb(arqma::Response{Status::SERVICE_UNAVAILABLE, std::move(msg)});
-    return;
-  }
+  return (util::starts_with(url, "/arqma/") && util::ends_with(url, "/lsrpc") && (url.find('?') == std::string::npos);
+}
 
-  ARQMA_LOG(debug, "process_onion_req: {}", v2);
+void RequestHandler::process_onion_req(RelayToServerInfo&& info, OnionRequestMetadata&& data)
+{
+  if (is_server_url_allowed(info.target))
+    return process_onion_to_url(info.protocol, std::move(info.host), info.port, std::move(info.target), std::move(info.payload), std::move(data.cb));
 
-  if (!v2)
-  {
-    cb(arqma::Response{Status::BAD_REQUEST, "BAD onion request"});
-    return;
-  }
+  return data.cb(wrap_proxy_response({Status::BAD_REQUEST, "Invalid url"}, data.ephem_key, data.enc_type));
+}
 
-  ParsedInfo res = process_ciphertext_v2(channel_cipher_, ciphertext, ephem_key);
-
-  if (const auto info = std::get_if<FinalDestinationInfo>(&res))
+void RequestHandler::process_onion_req(ProcessCiphertextError&& error, OnionRequestMetadata&& data)
+{
+  switch (error)
   {
-    ARQMA_LOG(debug, "We are the final destination in the onion request");
-
-    this->process_onion_exit(ephem_key, info->body,
-      [this, ephem_key, cb = std::move(cb)](arqma::Response res)
-      {
-        cb(wrap_proxy_response(res, ephem_key, EncryptType::aes_gcm));
-      });
-    return;
-  }
-  else if (const auto info = std::get_if<RelayToNodeInfo>(&res))
-  {
-    relay_to_node(this->service_node_, *info, std::move(cb), v2);
-  }
-  else if (const auto info = std::get_if<RelayToServerInfo>(&res))
-  {
-    ARQMA_LOG(debug, "We are to forward the request to url" {}{}", info->host, info->target);
-
-    const auto& target = info->target;
-
-    if ((util::ends_with(target, "/lsrpc")) && (target.find('?') == std::string::npos))
-    {
-      this->process_onion_to_url(info->protocol, info->host, info->port, target, info->payload, std::move(cb));
-    }
-    else
-    {
-      cb(wrap_proxy_response({Status::BAD_REQUEST, "Invalid url"}, ephem_key, EncryptType::aes_gcm));
-    }
-  }
-  else if (const auto error = std::get_if<ProcessCiphertextError>(&res))
-  {
-    switch (*error)
-    {
-      case ProcessCiphertextError::INVALID_CIPHERTEXT:
-      {
-        cb(arqma::Response{Status::BAD_REQUEST, "Invalid ciphertext"});
-        break;
-      }
-      case ProcessCiphertextError::INVALID_JSON:
-      {
-        cb(wrap_proxy_response({Status::BAD_REQUEST, "Invalid json"}, ephem_key, EncryptType::aes_gcm));
-        break;
-      }
-    }
-  }
-  else
-  {
-    ARQMA_LOG(error, "UNKNOWN VARIANT");
+    case ProcessCiphertextError::INVALID_CIPHERTEXT:
+      return data.cb({Status::BAD_REQUEST, "Invalid ciphertext"});
+    case ProcessCiphertextError::INVALID_JSON:
+      return data.cb(wrap_proxy_response({Status::BAD_REQUEST, "Invalid json"}, data.ephem_key, data.enc_type));
   }
 }
 
-auto parse_combined_payload(const std::string& payload) -> CiphertextPlusJson
+auto parse_combined_payload(std::string_view payload) -> CiphertextPlusJson
 {
   ARQMA_LOG(trace, "Parsing payload of length: {}", payload.size());
-
-  auto it = payload.begin();
 
   if (payload.size() < 4)
   {
     ARQMA_LOG(warn, "Unexpected payload size");
-    throw std::exception();
+    throw std::runtime_error{"Unexpected payload size"};
   }
 
   uint32_t n;
@@ -254,20 +210,22 @@ auto parse_combined_payload(const std::string& payload) -> CiphertextPlusJson
 
   ARQMA_LOG(trace, "Ciphertext length: {}", n);
 
-  if (payload.size() < 4 + n)
+  payload.remove_prefix(sizeof(uint32_t));
+  if (payload.size() < n)
   {
     ARQMA_LOG(warn, "Unexpected payload size");
-    throw std::exception();
+    throw std::runtime_error{"Unexpected payload size"};
   }
 
-  it += sizeof(uint32_t);
+  CiphertextPlusJson result;
+  auto& [ciphertext, json] = result;
 
-  const auto ciphertext = std::string(it, it + n);
+  ciphertext = payload.substr(0, n);
   ARQMA_LOG(debug, "ciphertext length: {}", ciphertext.size());
-  const auto json_blob = std::string(it + n, payload.end());
-  ARQMA_LOG(debug, "json blob: (len: {})", json_blob.size());
+  payload.remove_prefix(ciphertext.size());
 
-  return CiphertextPlusJson{ciphertext, json_blob};
+  json = json::parse(payload);
+  return result;
 }
 
 std::ostream& operator<<(std::ostream& os, const FinalDestinationInfo& d)

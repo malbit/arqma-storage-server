@@ -33,7 +33,6 @@ namespace arqma {
 
 using storage::Item;
 
-constexpr std::array<std::chrono::seconds, 8> RETRY_INTERVALS = { 1s, 5s, 10s, 20s, 40s, 80s, 160s, 320s };
 constexpr std::chrono::milliseconds RELAY_INTERVAL = 350ms;
 
 static void make_sn_request(boost::asio::io_context& ioc, const sn_record_t& sn,
@@ -58,10 +57,6 @@ ServiceNode::ServiceNode(boost::asio::io_context& ioc,
     db_(std::make_unique<Database>(ioc, db_location)),
     our_address_{std::move(address)},
     our_seckey_{skey},
-    arqmad_ping_timer_(ioc),
-    stats_cleanup_timer_(ioc),
-    peer_ping_timer_(ioc),
-    relay_timer_(ioc),
     arqmq_server_(arqmq_server),
     force_start_(force_start)
 {
@@ -69,14 +64,16 @@ ServiceNode::ServiceNode(boost::asio::io_context& ioc,
 
   ARQMA_LOG(info, "Requesting initial swarm state");
 
-  cleanup_timer_tick();
+  arqmq_server_->add_timer([this] { std::lock_guard l{sn_mutex_}; all_stats_.cleanup(); }, STATS_CLEANUP_INTERVAL);
 }
 
 void ServiceNode::on_arqmad_connected()
 {
   update_swarms();
-  arqmad_ping_timer_tick();
-  arqmq_server_->add_timer([this] { std::lock_guard l{sn_mutex_}; ping_peers_tick(); }, reachability_testing::TESTING_TIMER_INTERVAL);
+  arqmad_ping();
+  arqmq_server_->add_timer([this] { arqmad_ping(); }, ARQMAD_PING_INTERVAL);
+  arqmq_server_->add_timer([this] { ping_peers(); }, reachability_testing::TESTING_TIMER_INTERVAL);
+  arqmq_server_->add_timer([this] { relay_buffered_messages(); }, RELAY_INTERVAL);
 }
 
 static block_update_t parse_swarm_update(const std::string& response_body, bool from_json_rpc = false)
@@ -107,6 +104,11 @@ static block_update_t parse_swarm_update(const std::string& response_body, bool 
 
     const json service_node_states = result.at("service_node_states");
 
+    if (!sn_json.at("funded").get<bool>())
+    {
+      continue;
+    }
+
     for (const auto& sn_json : service_node_states) {
       const auto& pk_x25519_hex = sn_json.at("pubkey_x25519").get_ref<const std::string&>();
       const auto& pk_ed25519_hex = sn_json.at("pubkey_ed25519").get_ref<const std::string&>();
@@ -114,10 +116,6 @@ static block_update_t parse_swarm_update(const std::string& response_body, bool 
       if (pk_x25519_hex.empty() || pk_ed25519_hex.empty())
       {
         ARQMA_LOG(warn, "ed25519/x25519 pubkeys are missing from sn info");
-        continue;
-      }
-
-      if (!sn_json.at("funded").get<bool>()) {
         continue;
       }
 
@@ -249,14 +247,10 @@ bool ServiceNode::snode_ready(std::string* reason) {
     return problems.empty() || force_start_;
 }
 
-void ServiceNode::send_onion_to_sn_v1(const sn_record_t& sn, const std::string& payload, const std::string& eph_key, ss_client::Callback cb) const
+void ServiceNode::send_onion_to_sn(const sn_record_t& sn, std::string_view payload, OnionRequestMetadata&& data, ss_client::Callback cb) const
 {
-  arqmq_server_->request(sn.pubkey_x25519.view(), "sn.onion_req", std::move(cb), eph_key, payload);
-}
-
-void ServiceNode::send_onion_to_sn_v2(const sn_record_t& sn, const std::string& payload, const std::string& eph_key, ss_client::Callback cb) const
-{
-  arqmq_server_->request(sn.pubkey_x25519.view(), "sn.onion_req_v2", std::move(cb), arqmamq::send_option::request_timeout{10s}, eph_key, payload);
+  data.hop_no++;
+  arqmq_server_->request(sn.pubkey_x25519.view(), "sn.onion_request", std::move(cb), arqmamq::send_option::request_timeout{30s}, arqmq_server_.encode_onion_data(payload, data));
 }
 
 void ServiceNode::send_to_sn(const sn_record_t& sn, ss_client::ReqMethod method, ss_client::Request req, ss_client::Callback cb) const
@@ -476,14 +470,9 @@ void ServiceNode::on_swarm_update(const block_update_t& bu)
         ARQMA_LOG(warn, "Storage server is still not ready: {}", reason);
         return;
     } else {
-        static bool active = false;
-        if (!active) {
+        if (!active_) {
             ARQMA_LOG(info, "Storage server is now active!");
-
-            relay_timer_.expires_after(RELAY_INTERVAL);
-            relay_timer_.async_wait(std::bind(&ServiceNode::relay_buffered_messages, this));
-
-            active = true;
+            active_ = true;
         }
     }
 
@@ -508,9 +497,6 @@ void ServiceNode::on_swarm_update(const block_update_t& bu)
 void ServiceNode::relay_buffered_messages()
 {
   std::lock_guard guard(sn_mutex_);
-
-  relay_timer_.expires_after(RELAY_INTERVAL);
-  relay_timer_.async_wait(std::bind(&ServiceNode::relay_buffered_messages, this));
 
   if (relay_buffer_.empty())
     return;
@@ -592,22 +578,14 @@ void ServiceNode::update_swarms()
     };
 }
 
-void ServiceNode::cleanup_timer_tick() {
-
-    std::lock_guard guard(sn_mutex_);
-    all_stats_.cleanup();
-
-    stats_cleanup_timer_.expires_after(STATS_CLEANUP_INTERVAL);
-    stats_cleanup_timer_.async_wait(std::bind(&ServiceNode::cleanup_timer_tick, this));
-}
-
-void ServiceNode::update_last_ping(bool arqmq)
+void ServiceNode::update_last_ping(ReachType type)
 {
-  reach_records_.incoming_ping(arqmq);
+  reach_records_.incoming_ping(type);
 }
 
-void ServiceNode::ping_peers_tick() {
+void ServiceNode::ping_peers() {
 
+    std::lock_guard lock{sn_mutex_};
     if (this->status_ == SnodeStatus::UNSTAKED || this->status_ == SnodeStatus::UNKNOWN)
     {
       ARQMA_LOG(trace, "Skipping peer testing (unstaked)");
@@ -669,7 +647,7 @@ void ServiceNode::test_reachability(const sn_record_t& sn, int previous_failures
     make_sn_request(ioc_, sn, std::move(req), std::move(http_callback));
 
     arqmq_server_->request(
-      sn.pubkey_x25519.view(), "sn.onion_req",
+      sn.pubkey_x25519.view(), hf_at_least(STORAGE_SERVER_HARDFORK) ? "sn.ping" : "sn.onion_req",
       [this, test_results=std::move(test_results), previous_failures](bool success, const auto&) {
         auto& [sn, result] = *test_results;
 
@@ -684,7 +662,7 @@ void ServiceNode::test_reachability(const sn_record_t& sn, int previous_failures
     );
 }
 
-void ServiceNode::arqmad_ping_timer_tick() {
+void ServiceNode::arqmad_ping() {
 
     std::lock_guard guard(sn_mutex_);
 
@@ -733,10 +711,6 @@ void ServiceNode::arqmad_ping_timer_tick() {
       else if (result.front() == "ALREADY")
         ARQMA_LOG(debug, "Renewed arqmad new block notificarion subscription");
     });
-
-    arqmad_ping_timer_.expires_after(ARQMAD_PING_INTERVAL);
-    arqmad_ping_timer_.async_wait(
-        std::bind(&ServiceNode::arqmad_ping_timer_tick, this));
 }
 
 void ServiceNode::attach_signature(request_t& request,
@@ -1074,7 +1048,7 @@ void ServiceNode::bootstrap_swarms(
     }
 
     std::unordered_map<swarm_id_t, size_t> swarm_id_to_idx;
-    for (auto i = 0u; i < all_swarms.size(); ++i) {
+    for (size_t i = 0; i < all_swarms.size(); ++i) {
         swarm_id_to_idx.insert({all_swarms[i].swarm_id, i});
     }
 
@@ -1099,7 +1073,7 @@ void ServiceNode::bootstrap_swarms(
                 continue;
             }
 
-            swarm_id = get_swarm_by_pk(all_swarms, pk);
+            swarm_id = get_swarm_by_pk(all_swarms, pk).swarm_id;
             cache.insert({entry.pub_key, swarm_id});
         } else {
             swarm_id = it->second;
@@ -1330,21 +1304,7 @@ ServiceNode::get_snodes_by_pk(const user_pubkey_t& pk)
         return {};
     }
 
-    const auto& all_swarms = swarm_->all_valid_swarms();
-
-    swarm_id_t swarm_id = get_swarm_by_pk(all_swarms, pk);
-
-    // TODO: have get_swarm_by_pk return idx into all_swarms instead,
-    // so we don't have to find it again
-
-    for (const auto& si : all_swarms) {
-        if (si.swarm_id == swarm_id)
-            return si.snodes;
-    }
-
-    ARQMA_LOG(critical, "Something went wrong in get_snodes_by_pk");
-
-    return {};
+    return get_swarm_by_pk(swarm_->all_valid_swarms(), pk).snodes;
 }
 
 } // namespace arqma

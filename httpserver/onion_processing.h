@@ -1,19 +1,19 @@
 #pragma once
 
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <variant>
 #include "arqmad_key.h"
 
 namespace arqma {
 
-struct CiphertextPlusJson {
-  std::string ciphertext;
-  std::string json;
-};
+inline constexpr int MAX_ONION_HOPS = 15;
+
+using CiphertextPlusJson = std::pair<std::string, nlohmann::json>;
 
 struct RelayToNodeInfo {
   std::string ciphertext;
-  std::string ephemeral_key;
+  x25519_pubkey ephemeral_key;
   ed25519_pubkey next_node;
 };
 
@@ -35,6 +35,8 @@ bool operator==(const RelayToServerInfo& lhs, const RelayToServerInfo& rhs);
 
 struct FinalDestinationInfo {
   std::string body;
+  bool json = false;
+  bool base64 = true;
 };
 
 std::ostream& operator<<(std::ostream& os, const FinalDestinationInfo& p);
@@ -48,6 +50,10 @@ enum class ProcessCiphertextError {
 
 using ParsedInfo = std::variant<RelayToNodeInfo, RelayToServerInfo, FinalDestinationInfo, ProcessCiphertextError>;
 
-auto parse_combined_payload(const std::string& payload) -> CiphertextPlusJson;
+auto parse_combined_payload(std::string_view payload) -> CiphertextPlusJson;
 
-auto process_inner_request(const CiphertextPlusJson& parsed, std::string plaintext) -> ParsedInfo;
+auto process_inner_request(std::string plaintext) -> ParsedInfo;
+
+bool is_server_url_allowed(std::string_view url);
+
+}

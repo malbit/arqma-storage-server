@@ -44,11 +44,11 @@ std::array bogonRanges = { FromIPv4(0, 0, 0, 0, 8),
 
 static bool is_ip_public_inner(const uint32_t ip)
 {
-  for (const auto ipRange : bogonRanges)
+  for (const auto& [block, netmask] : bogonRanges)
   {
-    uint32_t netstart = (std::get<0>(ipRange) & std::get<1>(ipRange));
-    uint32_t netend = (netstart | ~std::get<1>(ipRange));
-    if ((ip >= netstart) && (ip <= netend))
+    uint32_t netstart = block & netmask;
+    uint32_t netend = netstart | ~netmask;
+    if (ip >= netstart && ip <= netend)
       return false;
   }
   return true;

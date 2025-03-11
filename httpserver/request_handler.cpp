@@ -149,7 +149,7 @@ Response RequestHandler::process_store(const json& params) {
         const auto msg =
             message_t{pk.str(), data, messageHash, ttlInt, timestampInt};
         success = service_node_.process_store(msg);
-    } catch (std::exception e) {
+    } catch (const std::exception e) {
         ARQMA_LOG(critical,
                  "Internal Server Error. Could not store message for {}",
                  obfuscate_pubkey(pk.str()));
@@ -291,22 +291,23 @@ Response RequestHandler::process_retrieve(const json& params) {
     return Response{Status::OK, res_body.dump(), ContentType::json};
 }
 
-void RequestHandler::process_client_req(const std::string& req_json, std::function<void(arqma::Response)> cb)
+void RequestHandler::process_client_req(std::string_view req_json, std::function<void(arqma::Response)> cb)
 {
     ARQMA_LOG(trace, "process_client_req str <{}>", req_json);
 
     const json body = json::parse(req_json, nullptr, false);
-    if (body == nlohmann::detail::value_t::discarded) {
+    if (body.is_discarded()) {
         ARQMA_LOG(debug, "Bad client request: invalid json");
-        cb(Response{Status::BAD_REQUEST, "invalid json\n"});
+        return cb(Response{Status::BAD_REQUEST, "invalid json\n"});
     }
 
-    ARQMA_LOG(trace, "process_client_req json <{}>", body.dump(2));
+    if (ARQMA_LOG_ENABLED(trace))
+      ARQMA_LOG(trace, "process_client_req json <{}>", body.dump(2));
 
     const auto method_it = body.find("method");
     if (method_it == body.end() || !method_it->is_string()) {
         ARQMA_LOG(debug, "Bad client request: no method field");
-        cb(Response{Status::BAD_REQUEST, "invalid json: no `method` field\n"});
+        return cb(Response{Status::BAD_REQUEST, "invalid json: no `method` field\n"});
     }
 
     const auto& method_name = method_it->get_ref<const std::string&>();
@@ -316,64 +317,59 @@ void RequestHandler::process_client_req(const std::string& req_json, std::functi
     const auto params_it = body.find("params");
     if (params_it == body.end() || !params_it->is_object()) {
         ARQMA_LOG(debug, "Bad client request: no params field");
-        cb(Response{Status::BAD_REQUEST, "invalid json: no `params` field\n"});
+        return cb(Response{Status::BAD_REQUEST, "invalid json: no `params` field\n"});
     }
 
     if (method_name == "store") {
         ARQMA_LOG(debug, "Process client request: store");
-        cb(this->process_store(*params_it));
-    } else if (method_name == "retrieve") {
+        return cb(process_store(*params_it));
+    }
+    if (method_name == "retrieve") {
         ARQMA_LOG(debug, "Process client request: retrieve");
-        cb(this->process_retrieve(*params_it));
+        return cb(process_retrieve(*params_it));
+    }
         // TODO: maybe we should check if (some old) clients requests long-polling and
         // then wait before responding to prevent spam
 
-    } else if (method_name == "get_snodes_for_pubkey") {
+    if (method_name == "get_snodes_for_pubkey") {
         ARQMA_LOG(debug, "Process client request: snodes for pubkey");
-        cb(this->process_snodes_by_pk(*params_it));
-    } else {
-        ARQMA_LOG(debug, "Bad client request: unknown method '{}'", method_name);
-        cb(Response{Status::BAD_REQUEST, fmt::format("no method {}", method_name)});
+        return cb(process_snodes_by_pk(*params_it));
     }
+
+    ARQMA_LOG(debug, "Bad client request: unknown method '{}'", method_name);
+    return cb({Status::BAD_REQUEST, "no method " + method_name});
 }
 
-Response RequestHandler::wrap_proxy_response(const Response& res, const x25519_pubkey& client_key, EncryptType enc_type) const
+Response RequestHandler::wrap_proxy_response(Response res, const x25519_pubkey& client_key, EncryptType enc_type, bool embed_json, bool base64) const
 {
-    nlohmann::json json_res;
+  auto status = static_cast<std::underlying_type_t<Status>>(res.status());
+  std::string body;
+  if (embed_json && res.content_type() == ContentType::json)
+    body = fmt::format(R"({{"status":{},"body":{}}})", status, res.message());
+  else
+    body = json{{"status", status}, {"body", res.message()}}.dump();
 
-    json_res["status"] = res.status();
-    json_res["body"] = res.message();
+  std::string ciphertext = channel_cipher_.encrypt(enc_type, body, client_key);
+  if (base64)
+    ciphertext = arqmamq::to_base64(std::move(ciphertext));
 
-    const std::string res_body = json_res.dump();
-    /// change to encrypt_gcm
-    std::string ciphertext;
-    channel_cipher_.encrypt(enc_type, res_body, client_key);
-    ciphertext = arqmamq::to_base64(ciphertext);
-    // why does this have to be json???
-    return Response{Status::OK, std::move(ciphertext), ContentType::json};
+  return Response{Status::OK, std::move(ciphertext), ContentType::json};
 }
 
-void RequestHandler::process_onion_exit(const x25519_pubkey& eph_key, const std::string& body, std::function<void(arqma::Response)> cb)
+void RequestHandler::process_onion_exit(std::string_view body, std::function<void(arqma::Response)> cb)
 {
     ARQMA_LOG(debug, "Processing onion exit!");
 
     if (!service_node_.snode_ready())
-    {
-      auto res = Response{Status::SERVICE_UNAVAILABLE, "Snode not ready"};
-      cb(wrap_proxy_response(res, client_key, false));
-      return;
-    }
+      return cb({Status::SERVICE_UNAVAILABLE, "Snode not ready"});
+
     this->process_client_req(body, std::move(cb));
 }
 
 void RequestHandler::process_proxy_exit(const x25519_pubkey& client_key, std::string_view payload, std::function<void(arqma::Response)> cb)
 {
     if (!service_node_.snode_ready())
-    {
-      auto res = Response{Status::SERVICE_UNAVAILABLE, "Snode not ready"};
-      cb(wrap_proxy_response(res, client_key, EncryptType::aes_cbc));
-      return;
-    }
+      return cb(wrap_proxy_response({Status::SERVICE_UNAVAILABLE, "Snode not ready"}, client_key, EncryptType::aes_cbc));
 
     static int proxy_idx = 0;
     int idx = proxy_idx++;
@@ -388,10 +384,8 @@ void RequestHandler::process_proxy_exit(const x25519_pubkey& client_key, std::st
     } catch (const std::exception& e) {
       auto msg = fmt::format("Invalid ciphertext: {}", e.what());
       ARQMA_LOG(debug, "{}", msg);
-      auto res = Response{Status::BAD_REQUEST, std::move(msg)};
 
-      cb(wrap_proxy_response(res, client_key, EncryptType::aes_cbc));
-      return;
+      return cb(wrap_proxy_response({Status::BAD_REQUEST, std::move(msg)}, client_key, EncryptType::aes_cbc));
     }
 
     std::string body;
@@ -410,12 +404,10 @@ void RequestHandler::process_proxy_exit(const x25519_pubkey& client_key, std::st
           }
         }
 
-    } catch (std::exception& e) {
+    } catch (const std::exception& e) {
         auto msg = fmt::format("JSON parsing error: {}", e.what());
         ARQMA_LOG(debug, "[{}] {}", idx, msg);
-        auto res = Response{Status::BAD_REQUEST, msg};
-        cb(wrap_proxy_response(res, client_key, EncryptType::aes_cbc));
-        return;
+        return cb(wrap_proxy_response({Status::BAD_REQUEST, std::move(msg)}, client_key, EncryptType::aes_cbc));
     }
 
     if (lp_used)
@@ -426,7 +418,7 @@ void RequestHandler::process_proxy_exit(const x25519_pubkey& client_key, std::st
     this->process_client_req(body, [this, cb = std::move(cb), client_key, idx](arqma::Response res)
     {
       ARQMA_LOG(debug, "[{}] proxy about to respond with: {}", idx, res.status());
-      cb(wrap_proxy_response(res, client_key, EncryptType::aes_cbc);
+      cb(wrap_proxy_response(std::move(res), client_key, EncryptType::aes_cbc);
     });
 }
 

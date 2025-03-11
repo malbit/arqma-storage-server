@@ -47,9 +47,9 @@ void reachability_testing::check_incoming_tests(const time_point_t& now)
   check_incoming_tests_impl("ArqmaMQ", now, startup, last_amq);
 }
 
-void reachability_testing::incoming_ping(bool amq, const time_point_t& now)
+void reachability_testing::incoming_ping(ReachType type, const time_point_t& now)
 {
-  (amq ? last_amq : last_https).last_test = now;
+  (type == ReachType::AMQ ? last_amq : last_https).last_test = now;
 }
 
 std::optional<sn_record_t> reachability_testing::next_random(const Swarm& swarm, const time_point_t& now, bool requeue)

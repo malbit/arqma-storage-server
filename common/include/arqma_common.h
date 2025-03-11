@@ -31,7 +31,7 @@ class user_pubkey_t {
   public:
     static user_pubkey_t create(std::string pk, bool& success) {
         success = true;
-        if (pk.size() != get_user_pubkey_size()) {
+        if (pk.size() != get_user_pubkey_size() || !arqmamq::is_hex(pk)) {
             success = false;
             return {};
         }
@@ -39,6 +39,14 @@ class user_pubkey_t {
     }
 
     const std::string& str() const { return pubkey_; }
+
+    std::string_view key() const
+    {
+      std::string_view r{pubkey_};
+      if (is_mainnet)
+        r.remove_prefix(2);
+      return r;
+    }
 };
 
 /// message as received by client

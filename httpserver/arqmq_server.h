@@ -11,9 +11,9 @@
 namespace arqma {
 
 struct arqmad_key_pair_t;
-
 class ServiceNode;
 class RequestHandler;
+struct OnionRequestMetadata;
 
 void arqmq_logger(arqmamq::LogLevel level, const char* file, int line, std::string message);
 
@@ -28,7 +28,10 @@ class ArqmamqServer {
 
   void handle_sn_data(arqmamq::Message& message);
   void handle_sn_proxy_exit(arqmamq::Message& message);
-  void handle_onion_request(arqmamq::Message& message, bool v2);
+  void handle_onion_req_v2(arqmamq::Message& message);
+  void handle_onion_request(arqmamq::Message& message);
+  void handle_onion_request(std::string_view payload, OnionRequestMetadata&& data, arqmamq::Message::DefferedSend send);
+  void handle_ping(arqmamq::Message& message);
   void handle_get_logs(arqmamq::Message& message);
   void handle_get_stats(arqmamq::Message& message);
 
@@ -57,6 +60,9 @@ public:
     assert(arqmad_conn_);
     amq_.send(arqmad_conn(), std::forward<Args>(args)...);
   }
+
+  static std::string encode_onion_data(std::string_view payload, const OnionRequestMetadata& data);
+  static std::pair<std::string_view, OnionRequestMetadata> decode_onion_data(std::string_view data);
 };
 
 }

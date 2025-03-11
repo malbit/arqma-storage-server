@@ -1,5 +1,7 @@
 #pragma once
 
+#include "channel_encryption.hpp"
+#include "onion_processing.h"
 #include "arqma_common.h"
 #include "arqmad_key.h"
 #include <string>
@@ -11,8 +13,6 @@
 
 namespace arqma {
 
-class ChannelEncryption;
-enum struct EncryptType;
 class ServiceNode;
 
   enum class Status {
@@ -68,13 +68,20 @@ public:
 
   std::string computeMessageHash(const std::string& timestamp, const std::string& ttl, const std::string& recipient, const std::string& data);
 
+  struct OnionRequestMetadata {
+    x25519_pubkey ephem_key;
+    std::function<void(arqma::Response)> cb;
+    int hop_no = 0;
+    EncryptType enc_type = EncryptType::aes_gcm;
+  };
+
   class RequestHandler {
     boost::asio::io_context& ioc_;
     ServiceNode& service_node_;
     const ChannelEncryption& channel_cipher_;
 
     // Wrap response `res` to an intermediate node
-    Response wrap_proxy_response(const Response& res, const x25519_pubkey& client_key, EncryptType enc_type) const;
+    Response wrap_proxy_response(Response res, const x25519_pubkey& client_key, EncryptType enc_type, bool json = false, bool base64 = true) const;
     // Return the correct swarm for `pubKey`
     Response handle_wrong_swarm(const user_pubkey_t& pubKey);
     // ===== Session Client Requests =====
@@ -84,12 +91,12 @@ public:
     Response process_store(const nlohmann::json& params);
     // Query the database and return requested messages
     Response process_retrieve(const nlohmann::json& params);
-    void process_onion_exit(const x25519_pubkey& eph_key, const std::string& payload, std::function<void(arqma::Response)> cb);
+    void process_onion_exit(std::string_view payload, std::function<void(arqma::Response)> cb);
     // ===================================
   public:
     RequestHandler(boost::asio::io_context& ioc, ServiceNode& sn, const ChannelEncryption<std::string>& ce);
     // Process all Session client requests
-    void process_client_req(const std::string& req_json, std::function<void(arqma::Response)> cb);
+    void process_client_req(std::string_view req_json, std::function<void(arqma::Response)> cb);
     // Test only: retrieve all db entires
     Response process_retrieve_all();
     // Handle a Session client reqeust sent via SN proxy
@@ -97,6 +104,12 @@ public:
 
     void process_onion_to_url(const std::string& protocol, const std::string& host, const uint16_const std::string& target, const std::string& payload, std::function<void(arqma::Response)> cb);
     // The result will arrive asynchronously, so it needs a callback handler
-    void process_onion_req(std::string_view ciphertext, const x25519_pubkey& ephem_key, std::function<void(arqma::Response)> cb, bool v2 = false);
+    void process_onion_req(std::string_view ciphertext, OnionRequestMetadata data);
+
+  private:
+    void process_onion_req(FinalDestinationInfo&& res, OnionRequestMetadata&& data);
+    void process_onion_req(RelayToNodeInfo&& res, OnionRequestMetadata&& data);
+    void process_onion_req(RelayToServerInfo&& res, OnionRequestMetadata&& data);
+    void process_onion_req(ProcessCiphertextError&& res, OnionRequestMetadata&& data);
   };
 }
