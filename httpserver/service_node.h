@@ -1,18 +1,16 @@
 #pragma once
 
-#include <Database.hpp>
 #include <chrono>
-#include <fstream>
-#include <iostream>
+#include <forward_list>
+#include <future>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
-#include <thread>
-#include <unordered_map>
+#include <string>
+#include <string_view>
 
-#include <boost/asio.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/circular_buffer.hpp>
-
+#include "Database.hpp"
 #include "arqma_common.h"
 #include "arqmad_key.h"
 #include "reachability_testing.h"
@@ -20,54 +18,36 @@
 #include "swarm.h"
 #include <string_view>
 
-namespace http = boost::beast::http;
-using request_t = http::request<http::string_body>;
-
 namespace arqma {
 
 inline constexpr size_t BLOCK_HASH_CACHE_SIZE = 30;
+inline constexpr auto SN_PING_TIMEOUT = 5s;
+inline constexpr auto STORAGE_TEST_TIMEOUT = 15s;
+inline constexpr auto BOOTSTRAP_TIMEOUT = 10s;
 inline constexpr int STORAGE_SERVER_HARDFORK = 16;
+inline constexpr int FUTURE_HF_IMPL = 17;
 
 namespace storage {
 struct Item;
 } // namespace storage
 
-struct sn_response_t;
-
 class ArqmamqServer;
 struct OnionRequestMetadata;
-
-namespace ss_client
-{
-  class Request;
-  enum class ReqMethod;
-  using Callback = std::function<void(bool success, std::vector<std::string>)>;
-}
-
-namespace http_server {
-class connection_t;
-}
-
 struct arqmad_key_pair_t;
-
-using connection_ptr = std::shared_ptr<http_server::connection_t>;
-
 class Swarm;
-
 struct signature;
+struct Response;
 
 enum class MessageTestStatus { SUCCESS, RETRY, ERROR, WRONG_REQ };
 enum class SnodeStatus { UNKNOWN, UNSTAKED, DECOMMISSIONED, ACTIVE };
 
 /// All service node logic that is not network-specific
 class ServiceNode {
-    using listeners_t = std::vector<connection_ptr>;
-
-    boost::asio::io_context& ioc_;
-
     bool syncing_ = true;
     bool active_ = false;
     bool got_first_response_ = false;
+    bool force_start_ = false;
+    std::atomic<bool> shutting_down_ = false;
     int hardfork_ = 0;
     uint64_t block_height_ = 0;
     uint64_t target_height_ = 0;
@@ -80,14 +60,13 @@ class ServiceNode {
     const sn_record_t our_address_;
     const legacy_seckey our_seckey_;
 
-    /// Cache for block_height/block_hash mapping
-    boost::circular_buffer<std::pair<uint64_t, std::string>> block_hashes_cache_{BLOCK_HASH_CACHE_SIZE};
+    std::map<uint64_t, std::string> block_hashes_cache_;
 
     ArqmamqServer& arqmq_server_;
 
-    bool force_start_ = false;
-
     std::atomic<int> arqmad_pings_ = 0;
+
+    std::atomic<bool> updating_swarms_ = false;
 
     reachability_testing reach_records_;
 
@@ -95,6 +74,7 @@ class ServiceNode {
 
     mutable all_stats_t all_stats_;
     mutable std::recursive_mutex sn_mutex_;
+    std::forward_list<std::future<void>> outstanding_https_reqs_;
     void save_if_new(const message_t& msg);
 
     // Save items to the database, notifying listeners as necessary
@@ -113,10 +93,6 @@ class ServiceNode {
     /// Distribute all our data to where it belongs
     /// (called when our old node got dissolved)
     void salvage_data() const;
-
-    void attach_signature(request_t& request, const signature& sig) const;
-
-    void attach_pubkey(std::shared_ptr<request_t>& request) const;
 
     void relay_data_reliable(const std::string& blob, const sn_record_t& address) const;
 
@@ -139,25 +115,23 @@ class ServiceNode {
                                const storage::Item& item);
 
     void process_storage_test_response(const sn_record_t& testee, const storage::Item& item,
-                                       uint64_t test_height, sn_response_t&& res);
+                                       uint64_t test_height, std::string status, std::string answer);
 
     /// Check if it is our turn to test and initiate peer test if so
     void initiate_peer_test();
 
-    // Select a random message from our database, return false on error
-    bool select_random_message(storage::Item& item);
+    std::optional<storage::Item> select_random_message();
 
     void test_reachability(const sn_record_t& sn, int previous_failures);
 
     void report_reachability(const sn_record_t& sn, bool reachable, int previous_failures);
 
-    void sign_request(request_t& req) const;
+    std::vector<std::pair<std::string, std::string>> sign_request(std::string_view body) const;
 
   public:
-    ServiceNode(boost::asio::io_context& ioc,
-                sn_record_t address, const legacy_seckey& skey,
+    ServiceNode(sn_record_t address, const legacy_seckey& skey,
                 ArqmamqServer& arqmq_server,
-                const std::string& db_location,
+                const std::filesystem::path& db_location,
                 const bool force_start);
 
     const sn_record_t& own_address() { return our_address_; }
@@ -165,14 +139,15 @@ class ServiceNode {
     void record_proxy_request();
     void record_onion_request();
 
-    void send_onion_to_sn(const sn_record_t& sn, std::string_view payload, OnionRequestMetadata&& data, ss_client::Callback cb) const;
-
-    void send_to_sn(const sn_record_t& sn, ss_client::ReqMethod method, ss_client::Request req, ss_client::Callback cb) const;
+    void send_onion_to_sn(const sn_record_t& sn, std::string_view payload, OnionRequestMetadata&& data, std::function<void(bool success, std::vector<std::string> data)> cb) const;
 
     bool hf_at_least(int hardfork) const { return hardfork_ >= hardfork; }
 
-    // Return true if the service node is ready to start running
-    bool snode_ready(std::string* reason = nullopt);
+    bool snode_ready(std::string* reason = nullptr);
+
+    void shutdown();
+
+    bool shutting_down() const { return shutting_down_; }
 
     /// Process message received from a client, return false if not in a swarm
     bool process_store(const message_t& msg);
@@ -181,10 +156,9 @@ class ServiceNode {
     void process_push_batch(const std::string& blob);
 
     // Attempt to find an answer (message body) to the storage test
-    MessageTestStatus process_storage_test_req(uint64_t blk_height,
+    std::pair<MessageTestStatus, std::string> process_storage_test_req(uint64_t blk_height,
                                                const legacy_pubkey& tester_addr,
-                                               const std::string& msg_hash,
-                                               std::string& answer);
+                                               const std::string& msg_hash_hex);
 
     bool is_pubkey_for_us(const user_pubkey_t& pk) const;
 

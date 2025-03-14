@@ -1,6 +1,5 @@
 #include "swarm.h"
 #include "arqma_logger.h"
-#include "http_connection.h"
 
 #include "service_node.h"
 

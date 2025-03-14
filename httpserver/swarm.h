@@ -3,14 +3,11 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <arqmamq/auth.h>
+#include <arqma-mq/auth.h>
+#include <unordered_map>
 
 #include "arqma_common.h"
 #include "sn_record.h"
-
-namespace boost::asio {
-class io_context;
-} // namespace boost::asio
 
 namespace arqma {
 

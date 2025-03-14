@@ -2,29 +2,25 @@
 
 #include "Database.hpp"
 #include "Item.hpp"
-#include "arqma_common.h"
+#include "http.h"
 #include "arqma_logger.h"
-#include "arqmad_key.h"
-#include "http_connection.h"
-#include "https_client.h"
+#include "request_handler.h"
 #include "arqmq_server.h"
-#include "net_stats.h"
 #include "serialization.h"
 #include "signature.h"
+#include "string_utils.hpp"
 #include "utils.hpp"
 #include "version.h"
+
+#include <boost/endian/conversion.hpp>
+#include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
-#include <arqmamq/base32z.h>
-#include <arqmamq/base64.h>
-#include <arqmamq/hex.h>
-#include <arqmamq/arqmamq.h>
-#include "request_handler.h"
+#include <arqma-mq/base32z.h>
+#include <arqma-mq/base64.h>
+#include <arqma-mq/hex.h>
+#include <arqma-mq/arqmamq.h>
 
 #include <algorithm>
-#include <chrono>
-#include <fstream>
-#include <string_view>
-#include <boost/endian/conversion.hpp>
 
 using json = nlohmann::json;
 namespace sp = std::placeholders;
@@ -35,36 +31,45 @@ using storage::Item;
 
 constexpr std::chrono::milliseconds RELAY_INTERVAL = 350ms;
 
-static void make_sn_request(boost::asio::io_context& ioc, const sn_record_t& sn,
-                            std::shared_ptr<request_t> req,
-                            http_callback_t&& cb) {
-    ARQMA_LOG(trace, "make sn_request to {} @ {}:{}", sn.pubkey_legacy, sn.ip, sn.port);
-    make_https_request_to_sn(ioc, sn, std::move(req}, std::move(cb));
-}
+using MISSING_PUBKEY_THRESHOLD = std::ratio<3, 100>;
 
 /// TODO: there should be config.h to store constants like these
 constexpr std::chrono::seconds STATS_CLEANUP_INTERVAL = 60min;
 constexpr std::chrono::seconds ARQMAD_PING_INTERVAL = 30s;
 constexpr int CLIENT_RETRIEVE_MESSAGE_LIMIT = 100;
 
-ServiceNode::ServiceNode(boost::asio::io_context& ioc,
-                         sn_record_t address,
+ServiceNode::ServiceNode(sn_record_t address,
                          const legacy_seckey& skey,
                          ArqmamqServer& arqmq_server,
-                         const std::string& db_location,
+                         const std::filesystem::path& db_location,
                          const bool force_start)
-  : ioc_(ioc),
-    db_(std::make_unique<Database>(ioc, db_location)),
+  : force_start_{force_start},
+    db_{std::make_unique<Database>(db_location)},
     our_address_{std::move(address)},
     our_seckey_{skey},
-    arqmq_server_(arqmq_server),
-    force_start_(force_start)
+    arqmq_server_{arqmq_server}
 {
   swarm_ = std::make_unique<Swarm>(our_address_);
 
   ARQMA_LOG(info, "Requesting initial swarm state");
 
+  arqmq_server->add_timer([this] { std::lock_guard l{sn_mutex_}; db_->clean_expired(); }, Database::CLEANUP_PERIOD);
+
   arqmq_server_->add_timer([this] { std::lock_guard l{sn_mutex_}; all_stats_.cleanup(); }, STATS_CLEANUP_INTERVAL);
+
+  arqmq_server_->add_timer([this] { outstanding_https_reqs_.remove_if([](auto& f) { return f.wait_for(0ms) == std::future_status::ready; }); }, 1s);
+
+  auto delay_timer = std::make_shared<arqmamq::TimerID>();
+  auto& dtimer = *delay_timer;
+  arqmq_server_->add_timer(dtimer, [this, timer=std::move(delay_timer)]
+  {
+    arqmq_server_->cancel_timer(*timer);
+    std::lock_guard lock{sn_mutex_};
+    if (!syncing_)
+      return;
+    ARQMA_LOG(warn, "Block syncing is taking too long. Activating SS regardless");
+    syncing_ = false;
+  }, 1h);
 }
 
 void ServiceNode::on_arqmad_connected()
@@ -76,7 +81,7 @@ void ServiceNode::on_arqmad_connected()
   arqmq_server_->add_timer([this] { relay_buffered_messages(); }, RELAY_INTERVAL);
 }
 
-static block_update_t parse_swarm_update(const std::string& response_body, bool from_json_rpc = false)
+static block_update_t parse_swarm_update(const std::string& response_body)
 {
   if (response_body.empty())
   {
@@ -92,8 +97,6 @@ static block_update_t parse_swarm_update(const std::string& response_body, bool 
   try
   {
     json result = json::parse(response_body, nullptr, true);
-    if (from_json_rpc)
-      result = result.ar("result");
 
     bu.height = result.at("height").get<uint64_t>();
     bu.block_hash = result.at("block_hash").get<std::string>();
@@ -104,18 +107,24 @@ static block_update_t parse_swarm_update(const std::string& response_body, bool 
 
     const json service_node_states = result.at("service_node_states");
 
-    if (!sn_json.at("funded").get<bool>())
-    {
-      continue;
-    }
+    int missing_aux_pks = 0, total = 0;
 
-    for (const auto& sn_json : service_node_states) {
+    for (const auto& sn_json : service_node_states)
+    {
+      if (!sn_json.at("funded").get<bool>())
+      {
+        continue;
+      }
+
+      total++;
+      const auto& pk_hex = sn_json.at("service_node_pubkey").get_ref<const std::string&>();
       const auto& pk_x25519_hex = sn_json.at("pubkey_x25519").get_ref<const std::string&>();
       const auto& pk_ed25519_hex = sn_json.at("pubkey_ed25519").get_ref<const std::string&>();
 
       if (pk_x25519_hex.empty() || pk_ed25519_hex.empty())
       {
-        ARQMA_LOG(warn, "ed25519/x25519 pubkeys are missing from sn info");
+        missing_aux_pks++;
+        ARQMA_LOG(debug, "ed25519/x25519 pubkeys are missing from sn info {}", pk_hex);
         continue;
       }
 
@@ -123,7 +132,7 @@ static block_update_t parse_swarm_update(const std::string& response_body, bool 
         sn_json.at("public_ip").get_ref<const std::string&>(),
         sn_json.at("storage_port").get<uint16_t>(),
         sn_json.at("storage_arqmq_port").get<uint16_t>(),
-        legacy_pubkey::from_hex(sn_json.at("service_node_pubkey").get_ref<const std::string&>()),
+        legacy_pubkey::from_hex(pk_hex),
         ed25519_pubkey::from_hex(pk_ed25519_hex),
         x25519_pubkey::from_hex(pk_x25519_hex)};
 
@@ -137,6 +146,13 @@ static block_update_t parse_swarm_update(const std::string& response_body, bool 
         swarm_map[swarm_id].push_back(std::move(sn));
       }
     }
+
+    if (missing_aux_pks > MISSING_PUBKEY_THRESHOLD::num*total/MISSING_PUBKEY_THRESHOLD::den)
+    {
+      ARQMA_LOG(warn, "Missing ed25519/x25519 pubkeys for {}/{} service nodes; "
+                      "arqmad may be out of sync with the network", missing_aux_pks, total);
+    }
+
   } catch (const std::exception& e) {
     ARQMA_LOG(critical, "Bad arqmad rpc response: invalid json ({})", e.what());
     throw std::runtime_error("Failed to parse swarm update");
@@ -155,7 +171,7 @@ void ServiceNode::bootstrap_data() {
 
     ARQMA_LOG(trace, "Bootstrapping peer data");
 
-    json params{
+    std::string params = json{
       {"fields", {
         {"service_node_pubkey", true},
         {"swarm_id", true},
@@ -169,67 +185,94 @@ void ServiceNode::bootstrap_data() {
         {"pubkey_ed25519", true},
         {"storage_arqmq_port", true}
       }}
-    };
+    }.dump();
 
-    std::vector<std::pair<std::string, uint16_t>> seed_nodes;
+    std::vector<arqmamq::address> seed_nodes;
     if (arqma::is_mainnet) {
-      seed_nodes = {{{"us.pool.arqma.com", 19994},
-                     {"eu.supportarqma.com", 19994},
-                     {"194.233.64.43", 19994}}};
+      seed_nodes = {{
+        "tcp://us.pool.arqma.com:19994",
+        "tcp://eu.supportarqma.com:19994",
+        "tcp://194.233.64.43:19994
+      }};
     } else {
-      seed_nodes = {{{"161.97.102.172", 39994},
-                     {"144.217.242.16", 39994}}};
+      seed_nodes = {{
+        "tcp://161.97.102.172:39994",
+        "tcp://144.217.242.16:39994"
+      }};
     }
 
-    auto req_counter = std::make_shared<size_t>(0);
+    auto req_counter = std::make_shared<std::atomic<int>>(0);
 
-    for (const auto& [addr, port] : seed_nodes)
+    for (const auto& addr : seed_nodes)
     {
-      arqmad_json_rpc_request(
-        ioc_, addr, port, "get_service_nodes", params,
-        [this, addr=addr, req_counter, node_count = seed_nodes.size()]
-        (sn_response_t&& res) {
-          if (res.error_code == SNodeError::NO_ERROR && res.body) {
-            ARQMA_LOG(info, "Parsing response from seed {}", addr);
+      auto connid = arqmq_server_->connect_remote(addr,
+        [addr](arqmamq::ConnectionID)
+        {
+          ARQMA_LOG(debug, "Connected to bootstrap node {}", addr);
+        },
+        [addr](arqmamq::ConnectionID, auto reason)
+        {
+          ARQMA_LOG(debug, "Failed to connect to bootstrap node {}: {}", addr, reason);
+        },
+        arqmamq::connect_option::ephemeral_routing_id{true};,
+        arqmamq::connect_option::timeout{BOOTSTRAP_TIMEOUT}
+      };
+      arqmq_server_->request(connid, "rpc.get_service_nodes",
+        [this, connid, addr, req_counter, node_count=(int)seed_nodes.size()](bool success, auto data)
+        {
+          if (!success)
+            ARQMA_LOG(err, "Failed to contact bootstrap node {}: request timed out", addr);
+          else if (data.empty())
+            ARQMA_LOG(err, "Failed to request bootstrap node data from {}: request returned no data", addr);
+          else if (data[0] != "200")
+            ARQMA_LOG(err, "Failed to request bootstrap node data from {}: request returned failure status {}", addr, data[0]);
+          else
+          {
+            ARQMA_LOG(info, "Parsing response from bootstrap node {}", addr);
             try
             {
-              const block_update_t bu = parse_swarm_update(*res.body, true);
-              if (!bu.unchanged)
-              {
-                this->on_bootstrap_update(std::move(bu));
-              }
+              auto update = parse_swarm_update(data[1]);
+              if (!update.unchanged)
+                on_bootstrap_update(std::move(update));
               ARQMA_LOG(info, "Bootstrapped from {}", addr);
             } catch (const std::exception& e) {
-              ARQMA_LOG(
-                        error,
-                        "Exception caught while bootstrapping from {}: {}",
-                        addr, e.what());
+              ARQMA_LOG(err, "Exception caught while bootstrapping from {}: {}", addr, e.what());
             }
-          } else {
-            ARQMA_LOG(error, "Failed to contact bootstrap node {}", addr);
           }
 
-          (*req_counter)++;
+          arqmq_server_->disconned(connid);
 
-          if (*req_counter == node_count)
+          if (++(*req_counter) == node_count)
           {
             ARQMA_LOG(info, "Bootstrapping done");
-            if (this->target_height_ > 0)
-            {
+            if (target_height_ > 0)
               update_swarms();
-            }
             else
             {
-              ARQMA_LOG(warn, "Could not contact any of the seed nodes to get target "
-                        "height. Going to assume our height is correct.");
-              this->syncing_ = false;
+              ARQMA_LOG(warn, "Could not contact any of the seed nodes to get target height. Going to assume our height is correct.");
+              syncing_ = false;
             }
           }
-        });
+        },
+        params,
+        arqmamq::send_option::request_timeout{BOOTSTRAP_TIMEOUT}
+      );
     }
 }
 
-bool ServiceNode::snode_ready(std::string* reason) {
+void ServiceNode::shutdown()
+{
+  shutting_down_ = true;
+}
+
+bool ServiceNode::snode_ready(std::string* reason)
+{
+    if (shutting_down())
+    {
+      if (reason)
+        *reason = "shutting down";
+      return false;
+    }
 
     std::lock_guard guard(sn_mutex_);
 
@@ -247,63 +290,20 @@ bool ServiceNode::snode_ready(std::string* reason) {
     return problems.empty() || force_start_;
 }
 
-void ServiceNode::send_onion_to_sn(const sn_record_t& sn, std::string_view payload, OnionRequestMetadata&& data, ss_client::Callback cb) const
+void ServiceNode::send_onion_to_sn(const sn_record_t& sn, std::string_view payload, OnionRequestMetadata&& data, std::function<void(bool success, std::vector<std::string> data)> cb) const
 {
   data.hop_no++;
   arqmq_server_->request(sn.pubkey_x25519.view(), "sn.onion_request", std::move(cb), arqmamq::send_option::request_timeout{30s}, arqmq_server_.encode_onion_data(payload, data));
 }
 
-void ServiceNode::send_to_sn(const sn_record_t& sn, ss_client::ReqMethod method, ss_client::Request req, ss_client::Callback cb) const
-{
-  std::lock_guard guard(sn_mutex_);
-
-  switch (method)
-  {
-    case ss_client::ReqMethod::DATA:
-    {
-      ARQMA_LOG(debug, "Sending sn.data request to {}", arqmamq::to_hex(sn.pubkey_x25519.view()));
-      arqmq_server_->request(sn.pubkey_x25519.view(), "sn.data", std::move(cb), req.body);
-      break;
-    }
-    case ss_client::ReqMethod::PROXY_EXIT:
-    {
-      auto client_key = req.headers.find(ARQMA_SENDER_KEY_HEADER);
-      if (client_key != req.headers.end())
-      {
-        ARQMA_LOG(debug, "Sending sn.proxy_exit request to {}", arqmamq::to_hex(sn.pubkey_x25519.view()));
-        arqmq_server_->request(sn.pubkey_x25519.view(), "sn.proxy_exit", std::move(cb), client_key->second, req.body);
-      }
-      else
-      {
-        ARQMA_LOG(debug, "Developer error: no {} passed in headers", ARQMA_SENDER_KEY_HEADER);
-        assert(false);
-      }
-      break;
-    }
-    case ss_client::ReqMethod::ONION_REQUEST:
-    {
-      ARQMA_LOG(error, "Onion requests should not use this interface");
-      assert(false);
-      break;
-    }
-  }
-}
-
 void ServiceNode::relay_data_reliable(const std::string& blob, const sn_record_t& sn) const
 {
-  auto reply_callback = [](bool success, std::vector<std::string> data)
+  ARQMA_LOG(debug, "Relaying data to: {} (x25519_pubkey {})", sn.pubkey_legacy, sn.pubkey_x25519);
+  arqmq_server_->request(sn.pubkey_x25519.view(), "sn.data", [](bool success, auto&& data)
   {
     if (!success)
-    {
-      ARQMA_LOG(error, "Failed to send batch data: time-out");
-    }
-  };
-
-  ARQMA_LOG(debug, "Relaying data to: {}, sn.pubkey_legacy);
-
-  auto req = ss_client::Request{blob, {}};
-
-  this->send_to_sn(sn, ss_client::ReqMethod::DATA, std::move(req), reply_callback);
+      ARQMA_LOG(err, "Failed to send batch data: time-out");
+  }, blob);
 }
 
 void ServiceNode::record_proxy_request()
@@ -323,7 +323,7 @@ bool ServiceNode::process_store(const message_t& msg) {
     /// only accept a message if we are in a swarm
     if (!swarm_) {
         // This should never be printed now that we have "snode_ready"
-        ARQMA_LOG(error, "error: my swarm in not initialized");
+        ARQMA_LOG(err, "error: my swarm in not initialized");
         return false;
     }
 
@@ -349,7 +349,7 @@ void ServiceNode::save_bulk(const std::vector<Item>& items) {
     std::lock_guard guard(sn_mutex_);
 
     if (!db_->bulk_store(items)) {
-        ARQMA_LOG(error, "failed to save batch to the database");
+        ARQMA_LOG(err, "failed to save batch to the database");
         return;
     }
 
@@ -445,8 +445,10 @@ void ServiceNode::on_swarm_update(const block_update_t& bu)
         block_height_ = bu.height;
         block_hash_ = bu.block_hash;
 
-        block_hashes_cache_.push_back(std::make_pair(bu.height, bu.block_hash));
+        while (block_hashes_cache_.size() >= BLOCK_HASH_CACHE_SIZE)
+          block_hashes_cache_.erase(block_hashes_cache_.begin());
 
+        block_hashes_cache_.emplace_hint(block_hashes_cache_.end(), bu.height, std::move(bu.block_hash));
     } else {
         ARQMA_LOG(trace, "already seen this block");
         return;
@@ -509,6 +511,12 @@ void ServiceNode::relay_buffered_messages()
 
 void ServiceNode::update_swarms()
 {
+    if (updating_swarms_.exchange(true))
+    {
+      ARQMA_LOG(debug, "Swarm update already in progress.");
+      return;
+    }
+
     std::lock_guard guard(sn_mutex_);
 
     ARQMA_LOG(debug, "Swarm update triggered");
@@ -535,6 +543,7 @@ void ServiceNode::update_swarms()
     arqmq_server_.arqmad_request("rpc.get_service_nodes",
       [this](bool success, std::vector<std::string> data)
       {
+        updating_swarms_ = false;
         if (!success || data.size() < 2)
         {
           ARQMA_LOG(critical, "Failed to contact local arqmad for service node list");
@@ -550,7 +559,7 @@ void ServiceNode::update_swarms()
             got_first_response_ = true;
 
             auto [missing, total] = count_missing_data(bu);
-            if (total >= (arqma::is_mainnet ? 100 : 10) && missing < 3*total/100)
+            if (total >= (arqma::is_mainnet ? 100 : 10) && missing <= MISSING_PUBKEY_THRESHOLD::num*total/MISSING_PUBKEY_THRESHOLD::den)
             {
               ARQMA_LOG(info, "Initialized from arqmad with {}/{} SN records", total-missing, total);
               syncing_ = false;
@@ -571,7 +580,7 @@ void ServiceNode::update_swarms()
         }
         catch (const std::exception& e)
         {
-          ARQMA_LOG(error, "Exception caught on swarm update: {}", e.what());
+          ARQMA_LOG(err, "Exception caught on swarm update: {}", e.what());
         }
       },
       params.dump();
@@ -613,11 +622,13 @@ void ServiceNode::ping_peers() {
       test_reachability(sn, prev_fails);
 }
 
-void ServiceNode::sign_request(request_t& req) const
+std::vector<std::pair<std::string, std::string>> ServiceNode::sign_request(std::string_view body) const
 {
-  const auto hash = hash_data(req.body());
-  const auto signature = generate_signature(hash, {our_address_.pubkey_legacy, our_seckey_});
-  attach_signature(req, signature);
+  std::vector<std::pair<std::string, std::string>> headers;
+  const auto signature = generate_signature(hash_data(body), {our_address_.pubkey_legacy, our_seckey_});
+  headers.emplace_back(http::SNODE_SIGNATURE_HEADER, arqmamq::to_base64(util::view_guts(signature)));
+  headers.emplace_back(http::SNODE_SENDER_HEADER, arqmamq::to_base32z(our_address_.pubkey_legacy.view()));
+  return headers;
 }
 
 void ServiceNode::test_reachability(const sn_record_t& sn, int previous_failures)
@@ -626,39 +637,91 @@ void ServiceNode::test_reachability(const sn_record_t& sn, int previous_failures
               previous_failures > 0 ? "previously failing" : "random",
               sn.pubkey_legacy);
 
+    if (sn.ip == "0.0.0.0")
+    {
+      ARQMA_LOG(debug, "Skipping HTTPS test of {}: no public IP received yet");
+      return;
+    }
+
     static constexpr uint8_t TEST_WAITING = 0, TEST_FAILED = 1, TEST_PASSED = 2;
 
     auto test_results = std::make_shared<std::pair<const sn_record_t, std::atomic<uint8_t>>>(sn, 0);
 
-    auto http_callback = [this, test_results, previous_failures](sn_response_t&& res)
-    {
-      auto& [sn, result] = *test_results;
+    bool cur_ping_test = !hf_at_least(FUTURE_HF_IMPL); // Future IMPLEMENTATIONS
+    cpr::Url url{fmt::format("https://{}:{}{}/ping_test/v1", sn.ip, sn.port, cur_ping_test ? "/swarms" : "")};
+    cpr::Body body{""};
+    cpr::Header headers{{"Host", sn.pubkey_ed25519 ? arqmamq::to_base32z(sn.pubkey_ed25519.view()) + ".snode" : "service-node.snode"}};
 
-      ARQMA_LOG(debug, "{} response for HTTP ping test of {}",
-                success ? "Successful" : "FAILED", sn.pubkey_legacy);
+    if (cur_ping_test)
+      for (auto& [h, v] : sign_request(body.str()))
+        headers[h] = std::move(v);
 
-      if (result.exchange(success ? TEST_PASSED : TEST_FAILED) != TEST_WAITING)
-        report_reachability(sn, success && result == TEST_PASSED, previous_failures);
-    };
+    outstanding_https_reqs_.emplace_front(
+      cpr::PostCallback(
+        [this, &arqmq=*arqmq_server(), cur_ping_test, test_results, previous_failures]
+        (cpr::Response r)
+        {
+          auto& [sn, result] = *test_results;
+          auto& pk = sn.pubkey_legacy;
+          bool success = false;
+          if (r.error.code != cpr::ErrorCode::OK)
+          {
+            ARQMA_LOG(debug, "FAILED HTTPS ping test of {}: {}", pk, r.error.message);
+          }
+          else if (r.status_code != 200)
+          {
+            ARQMA_LOG(debug, "FAILED HTTPS ping test of {}: received non-200 status {}", pk, r.status_code, r.status_line);
+          }
+          else
+          {
+            if (cur_ping_test)
+            {
+              if (r.header.count(http::SNODE_SIGNATURE_HEADER))
+                success = true;
+              else
+                ARQMA_LOG(debug, "FAILED HTTPS ping test of {}: {} response header missing", pk, http::SNODE_SIGNATURE_HEADER);
+            }
+            else
+            {
+              if (auto it = r.header.find(http::SNODE_PUBKEY_HEADER); it == r.header.end())
+                ARQMA_LOG(debug, "FAILED HTTPS ping test of {}: {} response header missing", pk, http::SNODE_PUBKEY_HEADER);
+              else if (auto remote_pk = parse_legacy_pubkey(it->second); remote_pk != pk)
+                ARQMA_LOG(debug, "FAILED HTTPS ping test of {}: reply has wrong pubkey {}", pk, remote_pk);
+              else
+                success = true;
+            }
+          }
+          if (success)
+            ARQMA_LOG(debug, "Successful HTTPS ping test of {}", pk);
 
-    auto req = build_post_request(sn.pubkey_ed25519, "/swarms/ping_test/v1", "{}");
-    this->sign_request(*req);
-
-    make_sn_request(ioc_, sn, std::move(req), std::move(http_callback));
+          if (auto r = result.exchange(success ? TEST_PASSED : TEST_FAILED); r != TEST_WAITING)
+            report_reachability(sn, success && r == TEST_PASSED, previous_failures);
+        },
+        std::move(url);
+        cpr::Timeout{SN_PING_TIMEOUT},
+        cpr::Ssl(cpr::ssl::TLSv1_2{},
+                 cpr::ssl::VerifyHost{false},
+                 cpr::ssl::VerifyPeer{false},
+                 cpr::ssl::VerifyStatus{false}),
+        cpr::MaxRedirects{0},
+        std::move(headers),
+        std::move(body)
+      )
+    );
 
     arqmq_server_->request(
-      sn.pubkey_x25519.view(), hf_at_least(STORAGE_SERVER_HARDFORK) ? "sn.ping" : "sn.onion_req",
+      sn.pubkey_x25519.view(), "sn.ping",
       [this, test_results=std::move(test_results), previous_failures](bool success, const auto&) {
         auto& [sn, result] = *test_results;
 
         ARQMA_LOG(debug, "{} response for ArqmaMQ ping test of {}",
                   success ? "Successful" : "FAILED", sn.pubkey_legacy);
 
-        if (result.exchange(success ? TEST_PASSED : TEST_FAILED) != TEST_WAITING)
-          report_reachability(sn, success && result == TEST_PASSED, previous_failures);
+        if (auto r = result.exchange(success ? TEST_PASSED : TEST_FAILED); r != TEST_WAITING)
+          report_reachability(sn, success && r == TEST_PASSED, previous_failures);
       },
-      "ping",
-      arqmamq::send_option::outgoing{}
+      arqmamq::send_option::outgoing{},
+      arqmamq::send_option::request_timeout{SN_PING_TIMEOUT}
     );
 }
 
@@ -666,7 +729,7 @@ void ServiceNode::arqmad_ping() {
 
     std::lock_guard guard(sn_mutex_);
 
-    json params{
+    json arqmad_params{
       {"version", STORAGE_SERVER_VERSION},
       {"https_port", our_address_.port()},
       {"arqmq_port", our_address_.arqmq_port()}};
@@ -699,7 +762,7 @@ void ServiceNode::arqmad_ping() {
             ARQMA_LOG(critical, "Could not ping arqmad: bad json in response");
           }
       },
-      params.dump()
+      arqmad_params.dump()
     };
 
     arqmq_server_.arqmad_request("sub.block", [](bool success, auto&& result) {
@@ -713,87 +776,117 @@ void ServiceNode::arqmad_ping() {
     });
 }
 
-void ServiceNode::attach_signature(request_t& request,
-                                   const signature& sig) const {
-
-    std::string raw_sig;
-    raw_sig.reserve(sig.c.size() + sig.r.size());
-    raw_sig.insert(raw_sig.begin(), sig.c.begin(), sig.c.end());
-    raw_sig.insert(raw_sig.end(), sig.r.begin(), sig.r.end());
-
-    const std::string sig_b64 = arqmamq::to_base64(raw_sig);
-    request.set(ARQMA_SNODE_SIGNATURE_HEADER, sig_b64);
-
-    request.set(ARQMA_SENDER_SNODE_PUBKEY_HEADER, arqmamq::to_base32z(our_address_.pubkey_legacy.view()));
-}
-
 void ServiceNode::process_storage_test_response(const sn_record_t& testee, const Item& item,
-                                                uint64_t test_height, sn_response_t&& res) {
-
-  std::lock_guard guard(sn_mutex_);
-
-  if (res.error_code != SNodeError::NO_ERROR) {
-    this->all_stats_.record_storage_test_result(testee.pubkey_legacy, ResultType::OTHER);
-    ARQMA_LOG(debug, "Failed to send a storage test request to snode: {}", testee.pubkey_legacy);
-    return;
-  }
-
-  if (!res.body) {
-    this->all_stats_.record_storage_test_result(testee.pubkey_legacy, ResultType::OTHER);
-    ARQMA_LOG(debug, "Empty body in storage test response");
-    return;
-  }
-
+                                                uint64_t test_height, std::string status, std::string answer)
+{
   ResultType result = ResultType::OTHER;
 
-  try {
-
-    json res_json = json::parse(*res.body);
-
-    const auto status = res_json.at("status").get<std::string>();
-
-    if (status == "OK") {
-      const auto value = res_json.at("value").get<std::string>();
-      if (value == item.data) {
-        ARQMA_LOG(debug, "Storage test is successful for: {} at height: {}", testee.pubkey_legacy, test_height);
-        result = ResultType::OK;
-      } else {
-        ARQMA_LOG(debug, "Test answer doesn't match for: {} at height: {}", testee.pubkey_legacy, test_height);
-        result = ResultType::MISMATCH;
-      }
-    } else if (status == "wrong request") {
-      ARQMA_LOG(debug, "Storage test rejected by testee");
-      result = ResultType::REJECTED;
-    } else {
-      result = ResultType::OTHER;
-      ARQMA_LOG(debug, "Storage test failed for unknown reason");
+  if (status.empty()) {
+    ARQMA_LOG(debug, "Failed to send a storage test request to snode: {}", testee.pubkey_legacy);
+  }
+  else if (status == "OK")
+  {
+    if (answer == item.data)
+    {
+      ARQMA_LOG(debug, "Storage test is successful for: {} at height: {}", testee.pubkey_legacy, test_height);
+      result = ResultType::OK;
     }
-  } catch(...) {
-    result = ResultType::OTHER;
-    ARQMA_LOG(debug, "Invalid json in storage test response");
+    else
+    {
+      ARQMA_LOG(debug, "Test answer doesn't match for: {} at height: {}", testee.pubkey_legacy, test_height);
+      result = ResultType::MISMATCH;
+    }
+  }
+  else if (status == "wrong request")
+  {
+    ARQMA_LOG(debug, "Storage test rejected by testee");
+    result = ResultType::REJECTED;
+  }
+  else
+  {
+    ARQMA_LOG(debug, "Storage test failed for some other reason: {}", status);
   }
 
-  this->all_stats_.record_storage_test_result(testee.pubkey_legacy, result);
+  std::lock_guard guard{sn_mutex_};
+  all_stats_.record_storage_test_result(testee.pubkey_legacy, result);
 }
 
 void ServiceNode::send_storage_test_req(const sn_record_t& testee,
                                         uint64_t test_height,
-                                        const Item& item) {
+                                        const Item& item)
+{
+  if (!hf_at_least(FUTURE_HF_IMPL))
+  {
+    cpr::Body body{json{{"height", test_height}, {"hash", item.hash}}.dumo()};
+    cpr::Header headers{{"Host", testee.pubkey_ed25519 ? arqmamq::to_base32z(testee.pubkey_ed25519.view()) + ".snode" : "service-node.snode"}};
 
-    std::lock_guard guard(sn_mutex_);
+    for (auto& [h, v] : sign_request(body.str()))
+      headers[h] = std::move(v);
 
-    nlohmann::json json_body;
+    outstanding_https_reqs_.emplace_front(
+      cpr::PostCallback(
+        [this, testee, item, height=block_height_]
+        (cpr::Response r)
+        {
+          auto& pk = testee.pubkey_legacy;
+          std::string status;
+          std::string answer;
+          if (r.error.code != cpr::ErrorCode::OK)
+            ARQMA_LOG(debug, "Failed storage test of {}: {}", pk, r.error.message);
+          else if (r.status_code != 200)
+            ARQMA_LOG(debug, "Failed storage test of {}: received non-200 status{}", pk, r.status_code, r.status_line);
+          else if (r.text.empty())
+            ARQMA_LOG(debug, "Failed storage test of {}: received empty body", pk);
+          else
+          {
+            try
+            {
+              json res_json = json::parse(r.text);
+              status = res_json.at("status").get<std::string>();
+              answer = res_json.at("value").get<std::string>();
+            }
+            catch (const std::exception& e)
+            {
+              ARQMA_LOG(debug, "Failed storage test of {}: invalid json response ({})", pk, e.what());
+              status.clear();
+              answer.clear();
+            }
+          }
 
-    json_body["height"] = test_height;
-    json_body["hash"] = item.hash;
+          process_storage_test_response(testee, item, height, std::move(status), std::move(answer));
+        },
+        cpr::Url{fmt::format("https://{}:{}/swarms/storage_test/v1", testee.ip, testee.port)},
+        cpr::Timeout{STORAGE_TEST_TIMEOUT},
+        cpr::Ssl(cpr::ssl::TLSv1_2{},
+                 cpr::ssl::VerifyHost{false},
+                 cpr::ssl::VerifyPeer{false},
+                 cpr::ssl::VerifyStatus{false}),
+        cpr::MaxRedirects{0},
+        std::move(headers),
+        std::move(body)
+      }
+    };
+    return;
+  }
 
-    auto req = build_post_request(testee.pubkey_ed25519, "/swarms/storage_test/v1", json_body.dump());
+  assert(arqmamq::is_hex(item.hash));
 
-    this->sign_request(*req);
-
-    make_sn_request(ioc_, testee, req, [testee, item, height = this->block_height_, this](sn_response_t&& res) {
-      this->process_storage_test_response(testee, item, height, std::move(res));
-    });
+  arqmq_server_->request(
+    testee.pubkey_x25519.view(), "sn.storage_test",
+    [this, testee, item, height=block_height_](bool success, auto data)
+    {
+      if (!success || data.size() != 2)
+      {
+        ARQMA_LOG(debug, "Storage test request failed: {}", !success ? "request timed out" : "wrong number of elements in response");
+      }
+      if (data.size() < 2)
+        data.resize(2);
+      process_storage_test_response(testee, item, height, std::move(data[0]), std::move(data[1]));
+    },
+    arqmamq::send_option::request_timeout{STORAGE_TEST_TIMEOUT},
+    std::to_string(block_height_),
+    arqmamq::from_hex(item.hash)
+  );
 }
 
 void ServiceNode::report_reachability(const sn_record_t& sn, bool reachable, int previous_failures)
@@ -820,7 +913,7 @@ void ServiceNode::report_reachability(const sn_record_t& sn, bool reachable, int
                 ARQMA_LOG(warn, "Could not report node: {}", status);
             }
         } catch (...) {
-            ARQMA_LOG(error,
+            ARQMA_LOG(err,
                       "Could not report node status: bad json in reponse");
         }
   };
@@ -862,13 +955,8 @@ bool ServiceNode::derive_tester_testee(uint64_t blk_height, sn_record_t& tester,
         ARQMA_LOG(trace, "got storage test request for an older block: {}/{}",
                   blk_height, block_height_);
 
-        const auto it =
-            std::find_if(block_hashes_cache_.begin(), block_hashes_cache_.end(),
-                         [=](const std::pair<uint64_t, std::string>& val) {
-                             return val.first == blk_height;
-                         });
-
-        if (it != block_hashes_cache_.end()) {
+        if (auto it = block_hashes_cache_.find(blk_keight); it != block_hashes_cache_.end())
+        {
             block_hash = it->second;
         } else {
             ARQMA_LOG(trace, "Could not find hash for a given block height");
@@ -883,7 +971,7 @@ bool ServiceNode::derive_tester_testee(uint64_t blk_height, sn_record_t& tester,
 
     uint64_t seed;
     if (block_hash.size() < sizeof(seed)) {
-        ARQMA_LOG(error, "Could not initiate peer test: invalid block hash");
+        ARQMA_LOG(err, "Could not initiate peer test: invalid block hash");
         return false;
     }
 
@@ -904,10 +992,10 @@ bool ServiceNode::derive_tester_testee(uint64_t blk_height, sn_record_t& tester,
     return true;
 }
 
-MessageTestStatus ServiceNode::process_storage_test_req(
+std::pair<MessageTestStatus, std::string> ServiceNode::process_storage_test_req(
     uint64_t blk_height, const legacy_pubkey& tester_pk,
-    const std::string& msg_hash, std::string& answer) {
-
+    const std::string& msg_hash_hex)
+{
     std::lock_guard guard(sn_mutex_);
     // 1. Check height, retry if we are behind
     std::string block_hash;
@@ -915,7 +1003,7 @@ MessageTestStatus ServiceNode::process_storage_test_req(
     if (blk_height > block_height_) {
         ARQMA_LOG(debug, "Our blockchain is behind, height: {}, requested: {}",
                   block_height_, blk_height);
-        return MessageTestStatus::RETRY;
+        return {MessageTestStatus::RETRY, ""};
     }
 
     // 2. Check tester/testee pair
@@ -925,15 +1013,15 @@ MessageTestStatus ServiceNode::process_storage_test_req(
         this->derive_tester_testee(blk_height, tester, testee);
 
         if (testee != our_address_) {
-            ARQMA_LOG(error, "We are NOT the testee for height: {}",
+            ARQMA_LOG(err, "We are NOT the testee for height: {}",
                       blk_height);
-            return MessageTestStatus::WRONG_REQ;
+            return {MessageTestStatus::WRONG_REQ, ""};
         }
 
         if (tester.pubkey_legacy != tester_pk) {
             ARQMA_LOG(debug, "Wrong tester: {}, expected: {}", tester_pk,
                       tester.pubkey_legacy);
-            return MessageTestStatus::WRONG_REQ;
+            return {MessageTestStatus::WRONG_REQ, ""};
         } else {
             ARQMA_LOG(trace, "Tester is valid: {}", tester_pk);
         }
@@ -941,39 +1029,40 @@ MessageTestStatus ServiceNode::process_storage_test_req(
 
     // 3. If for a current/past block, try to respond right away
     Item item;
-    if (!db_->retrieve_by_hash(msg_hash, item)) {
-        return MessageTestStatus::RETRY;
+    if (!db_->retrieve_by_hash(msg_hash_hex, item)) {
+        return {MessageTestStatus::RETRY, ""};
     }
 
     answer = item.data;
-    return MessageTestStatus::SUCCESS;
+    return {MessageTestStatus::SUCCESS, std::move(item.data)};
 }
 
-bool ServiceNode::select_random_message(Item& item) {
+std::optional<Item> ServiceNode::select_random_message() {
 
     uint64_t message_count;
     if (!db_->get_message_count(message_count)) {
-        ARQMA_LOG(error, "Could not count messages in the database");
-        return false;
+        ARQMA_LOG(err, "Could not count messages in the database");
+        return {};
     }
 
     ARQMA_LOG(debug, "total messages: {}", message_count);
 
     if (message_count == 0) {
         ARQMA_LOG(debug, "No messages in the database to initiate a peer test");
-        return false;
+        return {};
     }
 
     // SNodes don't have to agree on this, rather they should use different
     // messages
     const auto msg_idx = util::uniform_distribution_portable(message_count);
 
-    if (!db_->retrieve_by_index(msg_idx, item)) {
-        ARQMA_LOG(error, "Could not retrieve message by index: {}", msg_idx);
-        return false;
+    auto item = std::make_optional<Item>();
+    if (!db_->retrieve_by_index(msg_idx, *item)) {
+        ARQMA_LOG(err, "Could not retrieve message by index: {}", msg_idx);
+        return {};
     }
 
-    return true;
+    return item;
 }
 
 void ServiceNode::initiate_peer_test() {
@@ -1005,18 +1094,14 @@ void ServiceNode::initiate_peer_test() {
     }
 
     /// 2. Storage Testing
+    if (auto item = select_random_message())
     {
-        // 2.1. Select a message
-        Item item;
-        if (!this->select_random_message(item)) {
-            ARQMA_LOG(debug, "Could not select a message for testing");
-        } else {
-            ARQMA_LOG(trace, "Selected random message: {}, {}", item.hash,
-                      item.data);
-
-            // 2.2. Initiate testing request
-            this->send_storage_test_req(testee, test_height, item);
-        }
+      ARQMA_LOG(trace, "Selected random message: {}, {}", item->hash, item->data);
+      send_storage_test_req(testee, test_height, *item);
+    }
+    else
+    {
+      ARQMA_LOG(debug, "Could not select a message for testing");
     }
 }
 
@@ -1043,7 +1128,7 @@ void ServiceNode::bootstrap_swarms(
 
     std::vector<Item> all_entries;
     if (!get_all_messages(all_entries)) {
-        ARQMA_LOG(error, "Could not retrieve entries from the database");
+        ARQMA_LOG(err, "Could not retrieve entries from the database");
         return;
     }
 
@@ -1068,7 +1153,7 @@ void ServiceNode::bootstrap_swarms(
             auto pk = user_pubkey_t::create(entry.pub_key, success);
 
             if (!success) {
-                ARQMA_LOG(error, "Invalid pubkey in a message while "
+                ARQMA_LOG(err, "Invalid pubkey in a message while "
                                  "bootstrapping other nodes");
                 continue;
             }
@@ -1203,9 +1288,9 @@ std::string ServiceNode::get_stats() const {
         val["total_stored"] = total_stored;
     }
 
-    val["connections_in"] = get_net_stats().connections_in.load();
-    val["http_connections_out"] = get_net_stats().http_connections_out.load();
-    val["https_connections_out"] = get_net_stats().https_connections_out.load();
+    val["connections_in"] = -1;
+    val["http_connections_out"] = -1;
+    val["https_connections_out"] = -1;
 
     /// we want pretty (indented) json, but might change that in the future
     constexpr bool PRETTY = true;
@@ -1239,7 +1324,7 @@ std::string ServiceNode::get_status_line() const
   if (db_->get_message_count(total_stored))
     s << "; " << total_stored << " msgs";
   s << "; reqs(S/R): " << all_stats_.get_total_store_requests() << '/' << all_stats_.get_total_retrieve_requests();
-  s << "; conns(in/http/https): " << get_net_stats().connections_in << '/' << get_net_stats().http_connections_out << '/' << get_net_stats().https_connections_out;
+  /*s << "; conns(in/http/https): " << get_net_stats().connections_in << '/' << get_net_stats().http_connections_out << '/' << get_net_stats().https_connections_out;*/
   return s.str();
 }
 
@@ -1288,7 +1373,7 @@ bool ServiceNode::is_pubkey_for_us(const user_pubkey_t& pk) const
     std::lock_guard guard(sn_mutex_);
 
     if (!swarm_) {
-        ARQMA_LOG(error, "Swarm data missing");
+        ARQMA_LOG(err, "Swarm data missing");
         return false;
     }
     return swarm_->is_pubkey_for_us(pk);
@@ -1300,7 +1385,7 @@ ServiceNode::get_snodes_by_pk(const user_pubkey_t& pk)
     std::lock_guard guard(sn_mutex_);
 
     if (!swarm_) {
-        ARQMA_LOG(error, "Swarm data missing");
+        ARQMA_LOG(err, "Swarm data missing");
         return {};
     }
 

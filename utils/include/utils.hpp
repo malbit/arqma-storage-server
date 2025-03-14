@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <iosfwd>
 #include <optional>
 #include <random>
 #include <string>
@@ -27,32 +28,6 @@ uint64_t uniform_distribution_portable(uint64_t n);
 uint64_t uniform_distribution_portable(std::mt19937_64& mersenne_twister, uint64_t n);
 
 int get_fd_limit();
-
-inline bool ends_with(std::string_view str, std::string_view suffix)
-{
-  return str.size() >= suffix.size() && str.substr(str.size() - suffix.size()) == suffix;
-}
-
-inline bool starts_with(std::string_view str, std::string_view prefix)
-{
-  return str.substr(0, prefix.size()) == prefix;
-}
-
-template <typename It>
-std::string join(std::string_view delimiter, It begin, It end) {
-  std::ostringstream o;
-  if (begin != end)
-    o << *begin++;
-  while (begin != end)
-    o << delimiter << *begin++;
-  return o.str();
-}
-
-template <typename Container>
-std::string join(std::string_view delimiter, const Container& c)
-{
-  return join(delimiter, c.begin(), c.end());
-}
 
 std::optional<std::filesystem::path> get_home_dir();
 

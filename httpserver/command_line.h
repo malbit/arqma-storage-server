@@ -7,7 +7,7 @@ namespace arqma {
 
 struct command_line_options {
     uint16_t port;
-    std::string arqmad_amq_rpc; // Defaults to ipc://$HOME/.arqma/[stagenet/]arqmad.sock
+    std::string arqmad_arqmq_rpc; // Defaults to ipc://$HOME/.arqma/[stagenet/]arqmad.sock
     uint16_t arqmq_port;
     bool force_start = false;
     bool print_version = false;
@@ -25,6 +25,7 @@ struct command_line_options {
 class command_line_parser {
   public:
     void parse_args(int argc, char* argv[]);
+    void parse_args(std::vector<const char*> args);
     bool early_exit() const;
 
     const command_line_options& get_options() const;

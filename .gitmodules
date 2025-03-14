@@ -4,3 +4,13 @@
 [submodule "vendors/nlohmann_json"]
 	path = vendors/nlohmann_json
 	url = https://github.com/nlohmann/json.git
+[submodule "vendors/uWebSockets"]
+	path = vendors/uWebSockets
+	url = https://github.com/uNetworking/uWebSockets.git
+[submodule "vendors/cpr"]
+	path = vendors/cpr
+	url = https://github.com/whoshuu/cpr.git
+[submodule "vendors/arqma-mq"]
+	path = vendors/arqma-mq
+	url = https://github.com/malbit/arqma-mq.git
+	branch = dev

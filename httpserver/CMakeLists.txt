@@ -3,25 +3,20 @@ add_definitions(-Wfatal-errors)
 
 add_library(httpserver_lib STATIC
     main.cpp
-    http_connection.cpp
     swarm.cpp
     service_node.cpp
     serialization.cpp
     rate_limiter.cpp
-    https_client.cpp
     stats.cpp
-    security.cpp
     command_line.cpp
     reachability_testing.cpp
     arqmq_server.cpp
     request_handler.cpp
     onion_processing.cpp
-    ip_utils.cpp
     arqmad_rpc.cpp
+    server_certificates.cpp
+    https_server.cpp
     )
-
-set(JSON_MultipleHeaders ON CACHE BOOL "")
-add_subdirectory(../vendors/nlohmann_json nlohmann_json)
 
 target_compile_options(httpserver_lib PRIVATE -Wall -Werror)
 
@@ -31,11 +26,13 @@ target_link_libraries(httpserver_lib
     storage
     utils
     crypto
+    uWebSockets
+    cpr::cpr
     arqmamq::arqmamq
     OpenSSL::SSL
     OpenSSL::Crypto
     nlohmann_json::nlohmann_json
-    Boost::system
+    Boost::boost
     Boost::program_options)
 
 find_library(RESOLV resolv)
@@ -66,7 +63,7 @@ message(STATUS "using git commit hash ${SHORT_HASH}")
 message(STATUS "using UTC build time ${BUILD_TIME}")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/version.cpp.in" "${CMAKE_CURRENT_BINARY_DIR}/version.cpp")
 target_sources(httpserver_lib PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.cpp")
-target_include_directories(httpserver_lib PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(httpserver_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if (NOT BUILD_STATIC_DEPS)
   find_package(PkgConfig QUIET)

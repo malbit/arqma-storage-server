@@ -1,3 +1,4 @@
+
 #include "Database.hpp"
 #include "arqma_logger.h"
 #include "utils.hpp"
@@ -19,14 +20,14 @@ Database::~Database() {
     sqlite3_close(db);
 }
 
-Database::Database(boost::asio::io_context& ioc, const std::string& db_path, std::chrono::milliseconds cleanup_period)
-    : cleanup_period(cleanup_period), cleanup_timer_(ioc) {
+Database::Database(const std::filesystem::path& db_path)
+{
     open_and_prepare(db_path);
 
-    perform_cleanup();
+    clean_expired();
 }
 
-void Database::perform_cleanup() {
+void Database::clean_expired() {
     const auto now_ms = util::get_time_ms();
 
     sqlite3_bind_int64(delete_expired_stmt, 1, now_ms);
@@ -50,9 +51,6 @@ void Database::perform_cleanup() {
     if (reset_rc != SQLITE_OK && reset_rc != rc) {
         fprintf(stderr, "sql error: unexpected value from sqlite3_reset");
     }
-
-    cleanup_timer_.expires_after(this->cleanup_period);
-    cleanup_timer_.async_wait(std::bind(&Database::perform_cleanup, this));
 }
 
 sqlite3_stmt* Database::prepare_statement(const std::string& query) {
@@ -77,7 +75,7 @@ static void set_page_count(sqlite3* db)
   auto cb = [](void* a_param, int argc, char** argv, char** column) -> int {
     if (argc == 0)
     {
-      ARQMA_LOG(error, "Failed to set the page count limit");
+      ARQMA_LOG(err, "Failed to set the page count limit");
       return 0;
     }
 
@@ -85,7 +83,7 @@ static void set_page_count(sqlite3* db)
 
     if (res == 0)
     {
-      ARQMA_LOG(error, "Failed to convert page limit ({}) to a number", argv[0]);
+      ARQMA_LOG(err, "Failed to convert page limit ({}) to a number", argv[0]);
       return 0;
     }
 
@@ -100,7 +98,7 @@ static void set_page_count(sqlite3* db)
   {
     if (errMsg)
     {
-      ARQMA_LOG(error, "Query error: {}", errMsg);
+      ARQMA_LOG(err, "Query error: {}", errMsg);
     }
   }
 }
@@ -112,14 +110,14 @@ static void check_page_size(sqlite3* db)
   auto cb = [](void* a_param, int argc, char** argv, char** column) -> int {
     if (argc == 0)
     {
-      ARQMA_LOG(error, "Could not get DB page size");
+      ARQMA_LOG(err, "Could not get DB page size");
     }
 
     int res = strtol(argv[0], NULL, 10);
 
     if (res == 0)
     {
-      ARQMA_LOG(error, "Failed to convert page size ({}) to a number", argv[0]);
+      ARQMA_LOG(err, "Failed to convert page size ({}) to a number", argv[0]);
       return 0;
     }
 
@@ -140,14 +138,14 @@ static void check_page_size(sqlite3* db)
   {
     if (errMsg)
     {
-      ARQMA_LOG(error, "Query error: {}", errMsg);
+      ARQMA_LOG(err, "Query error: {}", errMsg);
     }
   }
 }
 
-void Database::open_and_prepare(const std::string& db_path) {
-    const std::string file_path = db_path + "/storage.db";
-    int rc = sqlite3_open_v2(file_path.c_str(), &db,
+void Database::open_and_prepare(const std::filesystem::path& db_path) {
+    const auto file_path = db_path / "storage.db";
+    int rc = sqlite3_open_v2(file_path.u8string().c_str(), &db,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
                                  SQLITE_OPEN_FULLMUTEX,
                              NULL);
@@ -160,7 +158,7 @@ void Database::open_and_prepare(const std::string& db_path) {
     }
 
     check_page_size(db);
-    set_page_size(db);
+    set_page_count(db);
 
     const char* create_table_query =
         "CREATE TABLE IF NOT EXISTS `Data`("
@@ -389,7 +387,7 @@ bool Database::store(const std::string& hash, const std::string& pubKey,
             break;
         } else if (rc == SQLITE_FULL) {
             if (db_full_counter % DB_FULL_FREQUENCY == 0) {
-                ARQMA_LOG(error, "Failed to store message: database is full");
+                ARQMA_LOG(err, "Failed to store message: database is full");
                 ++db_full_counter;
             }
             break;

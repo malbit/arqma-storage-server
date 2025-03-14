@@ -37,7 +37,7 @@ enum class ReachType { HTTPS, AMQ };
 
 class reachability_testing {
   public:
-    inline static constexpr auto TESTING_TIMER_INTERVAL = 50ms;
+    inline static constexpr auto TESTING_TIMER_INTERVAL = 200ms;
     inline static thread_local std::normal_distribution<float> TESTING_INTERVAL{10.0, 3.0};
     inline static constexpr auto TESTING_BACKOFF = 10s;
     inline static constexpr auto TESTING_BACKOFF_MAX = 2min;

@@ -20,7 +20,7 @@ else
 	CMAKE := cmake -G$(GEN)
 endif
 
-BUILD_STATIC ?= OFF
+BUILD_STATIC ?= ON
 
 MKDIR := mkdir -p $(BUILD_DIR) && cd $(BUILD_DIR)
 
@@ -52,11 +52,11 @@ clean-all:
 	rm -rf build
 
 format:
-	clang-format -style=file -i \
-		crypto/**/*.{cpp,hpp} \
-		storage/**/*.{cpp,hpp} \
-		utils/**/*.{cpp,hpp} \
-		httpserver/*.{cpp,h} \
-		common/**/*.{cpp,h}
+	clang-format -style=file -i --verbose \
+	httpserver/*.cpp httpserver/*.h \
+	crypto/**/*.cpp crypto/**/*.hpp crypto/**/*.h \
+	storage/**/*.cpp storage/**/*.hpp \
+	utils/**/*.cpp utils/**/*.hpp \
+	common/**/*.cpp common/**/*.h \
 
 .PHONY: all clean format rebuild

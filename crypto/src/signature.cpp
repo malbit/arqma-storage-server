@@ -10,8 +10,8 @@ extern "C" {
 #include <sodium/crypto_scalarmult_ed25519.h>
 #include <sodium/randombytes.h>
 #include <sodium/utils.h>
-#include <arqmamq/base32z.h>
-#include <arqmamq/base64.h>
+#include <arqma-mq/base32z.h>
+#include <arqma-mq/base64.h>
 
 #include <algorithm>
 #include <cassert>
@@ -34,8 +34,8 @@ struct s_comm {
 static ec_scalar monero_hash_to_scalar(const void* input, size_t size)
 {
   unsigned char hash[64] = {0};
-  cn_fast_hash(input, size, reinterpret_cast<char*<(hash));
-  sc_scalar result;
+  cn_fast_hash(input, size, reinterpret_cast<char*>(hash));
+  ec_scalar result;
   crypto_core_ed25519_scalar_reduce(result.data(), hash);
   return result;
 }
@@ -51,7 +51,7 @@ static Array concatenate(const T&... v)
 {
   static_assert((std::is_trivial_v<T> && ...));
   Array result;
-  unsigneg char* ptr = result.data();
+  unsigned char* ptr = result.data();
   (
    (std::memcpy(ptr, reinterpret_cast<const void*>(&v), sizeof(T)), ptr += sizeof(T)),
    ...
@@ -123,7 +123,7 @@ signature signature::from_base64(std::string_view signature_b64)
       throw std::runtime_error{"Invalid data: not base64-encoded"};
 
     // 64 bytes bytes -> 86/88 base64 encoded bytes with/without padding
-    if (!(signature_b64.size() == 86 || (signature_b64.size() == 88 && signature_b64.substr(86) == '==')))
+    if (!(signature_b64.size() == 86 || (signature_b64.size() == 88 && signature_b64.substr(86) == "==")))
       throw std::runtime_error{"Invalid data: b64 data size does not match signature size"};
 
     // convert signature

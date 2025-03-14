@@ -4,9 +4,9 @@
 #include "Item.hpp"
 #include "arqma_logger.h"
 #include "service_node.h"
+#include "string_utils.hpp"
 
 #include <boost/endian/conversion.hpp>
-#include <boost/format.hpp>
 
 namespace arqma {
 
@@ -15,13 +15,12 @@ using storage::Item;
 template <typename T>
 static void serialize_integer(std::string& buf, T a) {
     boost::endian::native_to_little_inplace(a);
-    buf += std::string_view{reinterpret_cast<const char*>(&a), sizeof(T)};
+    buf += util::view_guts(a);
 }
 
-static void serialize(std::string& buf, const std::string& str) {
-
-    buf.reserve(buf.size() + str.size() + 4);
-    serialize_integer(buf, str.size());
+static void serialize(std::string& buf, const std::string& str)
+{
+    serialize_integer<uint64_t>(buf, str.size());
     buf += str;
 }
 

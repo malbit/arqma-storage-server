@@ -1,10 +1,12 @@
 #include "arqmad_key.h"
+#include "arqma_logger.h"
 #include <cstring>
 #include <type_traits>
 
 #include <sodium.h>
-#include <arqmamq/base32z.h>
-#include <arqmamq/hex.h>
+#include <arqma-mq/base32z.h>
+#include <arqma-mq/base64.h>
+#include <arqma-mq/hex.h>
 
 namespace arqma {
 
@@ -29,6 +31,8 @@ void load_from_bytes(void* buffer, size_t length, std::string_view bytes)
 std::string to_hex(const unsigned char* buffer, size_t length)
 {
   return arqmamq::to_hex(buffer, buffer + length);
+}
+
 }
 
 std::string ed25519_pubkey::snode_address() const
@@ -56,5 +60,39 @@ x25519_pubkey x25519_seckey::pubkey() const
   crypto_scalarmult_curve25519_base(pk.data(), data());
   return pk;
 };
+
+template <typename T>
+static T parse_pubkey(std::string_view pubkey_in)
+{
+  T pk{};
+  static_assert(pk.size() == 32);
+  if (pubkey_in.size() == 32)
+    detail::load_from_bytes(pk.data(), 32, pubkey_in);
+  else if (pubkey_in.size() == 64 && arqmamq::is_hex(pubkey_in))
+    arqmamq::from_hex(pubkey_in.begin(), pubkey_in.end(), pk.begin());
+  else if ((pubkey_in.size() == 43 || (pubkey_in.size() == 44 && pubkey_in.back() == '=')) && arqmamq::is_base64(pubkey_in))
+    arqmamq::from_base64(pubkey_in.begin(), pubkey_in.end(), pk.begin());
+  else if (pubkey_in.size() == 52 && arqmamq::is_base32z(pubkey_in))
+    arqmamq::from_base32z(pubkey_in.begin(), pubkey_in.end(), pk.begin());
+  else
+  {
+    ARQMA_LOG(warn, "Invalid public key: not valid bytes, hex, b64 or b32z encoded");
+    ARQMA_LOG(debug, "Received public key encoded value of size {}: {}", pubkey_in.size(), pubkey_in);
+  }
+  return pk;
+}
+
+legacy_pubkey parse_legacy_pubkey(std::string_view pubkey_in)
+{
+  return parse_pubkey<legacy_pubkey>(pubkey_in);
+}
+ed25519_pubkey parse_ed25519_pubkey(std::string_view pubkey_in)
+{
+  return parse_pubkey<ed25519_pubkey>(pubkey_in);
+}
+x25519_pubkey parse_x25519_pubkey(std::string_view pubkey_in)
+{
+  return parse_pubkey<x25519_pubkey>(pubkey_in);
+}
 
 } // namespace arqma

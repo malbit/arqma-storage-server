@@ -7,7 +7,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
-#include <arqmamq/hex.h>
+#include <arqma-mq/hex.h>
 
 namespace arqma {
 

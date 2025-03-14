@@ -14,6 +14,11 @@ const command_line_options& command_line_parser::get_options() const {
     return options_;
 }
 
+void command_line_parser::parse_args(std::vector<const char*> args)
+{
+  parse_args(args.size(), const_cast<char**>(args.data()));
+}
+
 void command_line_parser::parse_args(int argc, char* argv[]) {
     std::string config_file;
     po::options_description all, hidden;
@@ -24,13 +29,13 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
     else
       arqma_sock = arqma_sock / ".arqma" / "arqmad.sock";
 
-    options_.arqmad_amq_rpc = "ipc://" + arqma_sock.u8string();
+    options_.arqmad_arqmq_rpc = "ipc://" + arqma_sock.u8string();
     // clang-format off
     desc_.add_options()
         ("data-dir", po::value(&options_.data_dir), "Path to persistent data (defaults to ~/.arqma/storage)")
         ("config-file", po::value(&config_file), "Path to custom config file (defaults to `storage-server.conf' inside --data-dir)")
         ("log-level", po::value(&options_.log_level), "Log verbosity level, see Log Levels below for accepted values")
-        ("arqmad-rpc", po::value(&options_.arqmad_amq_rpc), "ZMQ RPC address on which arqmad is available; typically ipc:///path/to/arqmad.sock or tcp://localhost:19995")
+        ("arqmad-rpc", po::value(&options_.arqmad_arqmq_rpc), "ZMQ RPC address on which arqmad is available; typically ipc:///path/to/arqmad.sock or tcp://localhost:19995")
         ("arqmq-port", po::value(&options_.arqmq_port), "Public port to listen on for ArqmaMQ connections")
         ("stagenet", po::bool_switch(&options_.stagenet), "Start storage server in stagenet mode")
         ("force-start", po::bool_switch(&options_.force_start), "Ignore the initialisation ready check")
@@ -79,7 +84,7 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
     if (options_.stagenet && !vm.count("arqmad-rpc"))
     {
       arqma_sock = arqma_sock.parent_path() / "stagenet" / "arqmad.sock";
-      options_.arqmad_amq_rpc = "ipc://" + arqma_sock.u8string();
+      options_.arqmad_arqmq_rpc = "ipc://" + arqma_sock.u8string();
     }
 
     if (!vm.count("arqmq-port"))

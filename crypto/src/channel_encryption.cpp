@@ -5,7 +5,7 @@
 #include <sodium/crypto_scalarmult.h>
 #include <sodium/crypto_auth_hmacsha256.h>
 #include <sodium/randombytes.h>
-#include <arqmamq/hex.h>
+#include <arqma-mq/hex.h>
 
 #include "utils.hpp"
 
@@ -101,7 +101,7 @@ static std::string encrypt_openssl(const EVP_CIPHER* cipher, int taglen, std::ba
 
   int len;
   // Encrypt every full blocks
-  if (EVP_EncryptUpdate(ctx, o, &len, p, plaintext.data(), plaintext.size()) <= 0)
+  if (EVP_EncryptUpdate(ctx, o, &len, plaintext.data(), plaintext.size()) <= 0)
   {
     throw std::runtime_error("Could not encrypt plaintext");
   }
@@ -159,7 +159,7 @@ static std::string decrypt_openssl(const EVP_CIPHER* cipher, int taglen, std::ba
 
   if (EVP_DecryptFinal_ex(ctx, o, &len) <= 0)
   {
-    thrown std::runtime_error("Could not finalize decryption");
+    throw std::runtime_error("Could not finalize decryption");
   }
   o += len;
 
@@ -168,9 +168,9 @@ static std::string decrypt_openssl(const EVP_CIPHER* cipher, int taglen, std::ba
   return output;
 }
 
-std::string ChannelEncryption::encrypt_cbc(std::string_view plaintext_, const x25519_pubkey& punKey) const
+std::string ChannelEncryption::encrypt_cbc(std::string_view plaintext_, const x25519_pubkey& pubKey) const
 {
-  return encrypt_openssl(EVP_aes_256_cbc(), 0, to_uchar(ciphertext_), calculate_shared_secret(private_key_, pubKey));
+  return encrypt_openssl(EVP_aes_256_cbc(), 0, to_uchar(plaintext_), calculate_shared_secret(private_key_, pubKey));
 }
 
 std::string ChannelEncryption::decrypt_cbc(std::string_view ciphertext_, const x25519_pubkey& pubKey) const

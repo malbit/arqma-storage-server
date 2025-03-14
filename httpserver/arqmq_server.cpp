@@ -1,15 +1,16 @@
 #include "arqmq_server.h"
 #include "dev_sink.h"
+#include "http.h"
 #include "arqma_common.h"
 #include "arqma_logger.h"
 #include "arqmad_key.h"
 #include "channel_encryption.hpp"
-#include "arqmamq/connection.h"
-#include "arqmamq/arqmamq.h"
+#include "arqma-mq/connection.h"
+#include "arqma-mq/arqmamq.h"
 #include "service_node.h"
 #include "request_handler.h"
 
-#include <arqmamq/hex.h>
+#include <arqma-mq/hex.h>
 #include <nlohmann/json.hpp>
 
 #include <optional>
@@ -80,13 +81,13 @@ void ArqmamqServer::handle_sn_proxy_exit(arqmamq::Message& message)
 
     request_handler_->process_proxy_exit(*client_key, payload, [send=message.send_later()](arqma::Response res)
     {
-      ARQMA_LOG(debug, "  Proxy exit status: {}", res.status());
-      if (res.status() == Status::OK)
+      ARQMA_LOG(debug, "  Proxy exit status: {}", res.status.first);
+      if (res.status == http::OK)
       {
-        send.reply(res.message());
+        send.reply(res.body);
       } else {
-        send.reply(fmt::format("{}", res.status()), res.message());
-        ARQMA_LOG(debug, "Error: status is not OK for proxy_exit: {}", res.status());
+        send.reply(std::to_string(res.status.first), res.body);
+        ARQMA_LOG(debug, "Error: status {} != OK for proxy_exit", res.status.first);
       }
     });
 }
@@ -98,6 +99,63 @@ void ArqmamqServer::handle_ping(arqmamq::Message& message)
   message.send_reply("pong");
 }
 
+void ArqmamqServer::handle_storage_test(arqmamq::Message& message)
+{
+  if (message.conn.pubkey().size() != 32)
+  {
+    ARQMA_LOG(err, "bug: invalid sn.storage_test arqmq request from {} with no pubkey", message.remote);
+    return message.send_reply("invalid parameters");
+  }
+  else if (message.data.size() < 2)
+  {
+    ARQMA_LOG(warn, "invalid sn.storage_test arqmq request from {}: not enough data parts; expected 2, received {}", message.remote, message.data.size());
+    return message.send_reply("invalid parameters");
+  }
+  legacy_pubkey tester_pk;
+  if (auto node = service_node_->find_node(x25519_pubkey::from_bytes(message.conn.pubkey())))
+  {
+    tester_pk = node->pubkey_legacy;
+    ARQMA_LOG(debug, "incoming sn.storage_test request from {}@{}", tester_pk, message.remote);
+  }
+  else
+  {
+    ARQMA_LOG(warn, "invalid sn.storage_test arqmq request from {}: sender is not an active SN", message.remote);
+    return message.send_reply("invalid pubkey");
+  }
+
+  uint64_t height
+  if (!util::parse_int(message.data[0], height) || !height)
+  {
+    ARQMA_LOG(warn, "invalid sn.storage_test arqmq request from {}@{}: '{}' is not a valid height", tester_pk, message.remote, height);
+    return message.send_reply("invalid height");
+  }
+  if (message.data[1].size() != 64)
+  {
+    ARQMA_LOG(warn, "invalid sn.storage_test arqmq request from {}@{}: message hash is {} bytes, expected 64", tester_pk, message.remote, message.data[1].size());
+    return message.send_reply("invalid msg hash");
+  }
+
+  request_handler_->process_storage_test_req(height, tester_pk, arqmamq::to_hex(message.data[1]),
+      [reply=message.send_later()](MessageTestStatus status, std::string answer, std::chrono::steady_clock::duration elapsed)
+  {
+    switch (status)
+    {
+      case MessageTestStatus::SUCCESS:
+        ARQMA_LOG(debug, "Storage test success after {}", util::friendly_duration(elapsed));
+        reply.reply("OK", answer);
+        return;
+      case MessageTestStatus::WRONG_REQ:
+        reply.reply("wrong request");
+        return;
+      case MessageTestStatus::RETRY:
+        [[fallthrough]];
+      case MessageTestStatus::ERROR:
+        ARQMA_LOG(debug, "Failed storage test, tried for {}", util::friendly_duration(elapsed));
+        reply.reply("other");
+    }
+  });
+}
+
 void ArqmamqServer::handle_onion_request(std::string_view payload, OnionRequestMetadata&& data, arqmamq::Message::DefferedSend send)
 {
     data.cb = [send](arqma::Response res)
@@ -105,11 +163,11 @@ void ArqmamqServer::handle_onion_request(std::string_view payload, OnionRequestM
       if (ARQMA_LOG_ENABLED(trace))
         ARQMA_LOG(trace, "on response: {}...", to_string(res).substr(0, 100));
 
-      send.reply(std::to_string(static_cast<int>(res.status())), std::move(res).message());
+      send.reply(std::to_string(res.status.first), std::move(res).body);
     };
 
     if (data.hop_no > MAX_ONION_HOPS)
-      return data.cb({Status::BAD_REQUEST, "onion request max path length exceeded"});
+      return data.cb({http::BAD_REQUEST, "onion request max path length exceeded"});
 
     request_handler_->process_onion_req(rayload, std::move(data));
 }
@@ -127,8 +185,8 @@ void ArqmamqServer::handle_onion_request(arqmamq::Message& message)
   catch (const std::exception& e)
   {
     auto msg = "Invalid internal onion request: "s + e.what();
-    ARQMA_LOG(error, "{}", msg);
-    message.send_reply(std::to_string(static_cast<int>(Status::BAD_REQUEST)), msg);
+    ARQMA_LOG(err, msg);
+    message.send_reply(std::to_string(http::BAD_REQUEST), msg);
     return;
   }
 
@@ -139,10 +197,10 @@ void ArqmamqServer::handle_onion_req_v2(arqmamq::Message& message)
 {
   ARQMA_LOG(debug, "Got v2 onion request over ArqmaMQ");
 
-  const int bad_code = static_casr<int>(Status::BAD_REQUEST);
+  constexpr int bad_code = http::BAD_REQUEST.first;
   if (message.data.size() != 2)
   {
-    ARQMA_LOG(error, "Expected 2 message parts, got {}", message.data.size());
+    ARQMA_LOG(err, "Expected 2 message parts, got {}", message.data.size());
     message.send_reply(std::to_string(bad_code), "Incorrect number of onion request message parts");
     return;
   }
@@ -150,7 +208,7 @@ void ArqmamqServer::handle_onion_req_v2(arqmamq::Message& message)
   auto eph_key = extract_x25519_from_hex(message.data[0]);
   if (!eph_key)
   {
-    ARQMA_LOG(error, "no ephemeral key in arqmq onion request");
+    ARQMA_LOG(err, "no ephemeral key in arqmq onion request");
     message.send_reply(std::to_string(bad_code), "Missing ephemeral key");
     return;
   }
@@ -195,7 +253,7 @@ void arqmq_logger(arqmamq::LogLevel level, const char* file, int line, std::stri
     switch (level)
     {
       AMQ_LOG_MAP(fatal, critical);
-      AMQ_LOG_MAP(error, error);
+      AMQ_LOG_MAP(error, err);
       AMQ_LOG_MAP(warn, warn);
       ARQ_LOG_MAP(info, info);
       ARQ_LOG_MAP(trace, trace);
@@ -208,7 +266,7 @@ ArqmamqServer::ArqmamqServer(
                const sn_record_t& me,
                const x25519_seckey& privkey;
                const std::vector<x25519_pubkey>& stats_access_keys) :
-      amq_{
+      arqmq_{
            std::string{me.pubkey_x25519.view()},
            std::string{privkey.view()},
            true,
@@ -221,39 +279,40 @@ ArqmamqServer::ArqmamqServer(
 
   ARQMA_LOG(info, "ArqmaMQ is listening on port {}", me.arqmq_port);
 
-  amq_.listen_curve(fmt::format("tcp://0.0.0.0:{}", me.arqmq_port),
+  arqmq_.listen_curve(fmt::format("tcp://0.0.0.0:{}", me.arqmq_port),
                     [this](std::string_view /*addr*/, std::string_view pk, bool/*sn*/)
                     {
                       return stats_access_keys_.count(std::string{pk}) ? arqmamq::AuthLevel::admin : arqmamq::AuthLevel::none;
                     });
 
-  amq_.add_category("sn", arqmamq::Access{arqmamq::AuthLevel::none, true, false})
-      .add_request_command("data", [this](auto& m) { this->handle_sn_data(m); })
-      .add_request_command("proxy_exit", [this](auto& m) { this->handle_sn_proxy_exit(m); })
-      .add_request_command("ping", [this](auto& m) { handle_ping(m); })
-      .add_request_command("onion_request", [this](auto& m) { handle_onion_request(m); });
+  arqmq_.add_category("sn", arqmamq::Access{arqmamq::AuthLevel::none, true, false}, 2, 1000)
+        .add_request_command("data", [this](auto& m) { handle_sn_data(m); })
+        .add_request_command("proxy_exit", [this](auto& m) { handle_sn_proxy_exit(m); })
+        .add_request_command("ping", [this](auto& m) { handle_ping(m); })
+        .add_request_command("storage_test", [this](auto& m) { handle_storage_test(m); })
+        .add_request_command("onion_request", [this](auto& m) { handle_onion_request(m); });
 
-  amq_.add_category("service", arqmamq::AuthLevel::admin)
-      .add_request_command("get_stats", [this](auto& m) { this->handle_get_stats(m); })
-      .add_request_command("get_logs", [this](auto& m) { this->handle_get_logs(m); });
+  arqmq_.add_category("service", arqmamq::AuthLevel::admin)
+        .add_request_command("get_stats", [this](auto& m) { handle_get_stats(m); })
+        .add_request_command("get_logs", [this](auto& m) { handle_get_logs(m); });
 
-  amq_.add_category("notify", arqmamq::AuthLevel::admin)
-      .add_request_command("block", [this](auto& m) {
-        ARQMA_LOG(debug, "Received new block notification from arqmad, updating swarms");
-        if (service_node_)
-          service_node_->update_swarms();
-      });
+  arqmq_.add_category("notify", arqmamq::AuthLevel::admin)
+        .add_request_command("block", [this](auto& m) {
+          ARQMA_LOG(debug, "Received new block notification from arqmad, updating swarms");
+          if (service_node_)
+            service_node_->update_swarms();
+        });
 
-  amq_.set_general_threads(1);
+  arqmq_.set_general_threads(1);
 
-  amq_.MAX_MSG_SIZE = 10 * 1024 * 1024;
+  arqmq_.MAX_MSG_SIZE = 10 * 1024 * 1024;
 
-  amq_.EPHEMERAL_ROUTING_ID = true;
+  arqmq_.EPHEMERAL_ROUTING_ID = true;
 }
 
 void ArqmamqServer::connect_arqmad(const arqmamq::address& arqmad_rpc)
 {
-  arqmad_conn_ = amq_.connect_remote(arqmad_rpc,
+  arqmad_conn_ = arqmq_.connect_remote(arqmad_rpc,
     [this](auto&&)
     {
       ARQMA_LOG(info, "Connection to Arqmad established");
@@ -273,7 +332,7 @@ void ArqmamqServer::init(ServiceNode* sn, RequestHandler* rh, arqmamq::address a
   assert(!service_node_);
   service_node_ = sn;
   request_handler_ = rh;
-  amq_.start();
+  arqmq_.start();
   connect_arqmad(arqmad_rpc);
 }
 
