@@ -11,9 +11,9 @@
 
 #include <boost/endian/conversion.hpp>
 #include <chrono>
-#include <arqma-mq/base64.h>
-#include <arqma-mq/hex.h>
-#include <arqma-mq/arqmamq.h>
+#include <arqmamq/base64.h>
+#include <arqmamq/hex.h>
+#include <arqmamq/arqmamq.h>
 #include <nlohmann/json.hpp>
 
 namespace arqma {

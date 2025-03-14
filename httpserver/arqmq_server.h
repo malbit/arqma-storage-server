@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <arqma-mq/arqmamq.h>
+#include <arqmamq/arqmamq.h>
 #include "sn_record.h"
 
 namespace arqma {

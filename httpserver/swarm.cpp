@@ -36,8 +36,8 @@ void debug_print(std::ostream& os, const block_update_t& bu)
     os << "    }\n";
   }
 
-  os << "  ]\n"
-  os << "}\n"
+  os << "  ]\n";
+  os << "}\n";
 }
 
 Swarm::~Swarm() = default;
@@ -262,7 +262,7 @@ static uint64_t hex_to_u64(const user_pubkey_t& pk) {
     /// Create a buffer for 16 characters null terminated
     char buf[17] = {};
 
-    comst auto hexpk = pk.key();
+    const auto hexpk = pk.key();
     assert(hexpk.size() == 64 && arqmqmq::is_hex(hexpk));
 
     uint64_t res = 0;

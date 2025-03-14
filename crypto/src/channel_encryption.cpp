@@ -5,7 +5,7 @@
 #include <sodium/crypto_scalarmult.h>
 #include <sodium/crypto_auth_hmacsha256.h>
 #include <sodium/randombytes.h>
-#include <arqma-mq/hex.h>
+#include <arqmamq/hex.h>
 
 #include "utils.hpp"
 

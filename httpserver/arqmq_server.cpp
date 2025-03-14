@@ -10,7 +10,7 @@
 #include "service_node.h"
 #include "request_handler.h"
 
-#include <arqma-mq/hex.h>
+#include <arqmamq/hex.h>
 #include <nlohmann/json.hpp>
 
 #include <optional>

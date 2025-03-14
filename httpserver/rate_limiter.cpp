@@ -3,7 +3,7 @@
 #include "arqma_common.h"
 
 #include <chrono>
-#include <arqma-mq/arqmamq.h>
+#include <arqmamq/arqmamq.h>
 #include <algorithm>
 
 namespace arqma {

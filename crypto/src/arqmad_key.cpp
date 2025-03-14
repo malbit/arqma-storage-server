@@ -4,9 +4,9 @@
 #include <type_traits>
 
 #include <sodium.h>
-#include <arqma-mq/base32z.h>
-#include <arqma-mq/base64.h>
-#include <arqma-mq/hex.h>
+#include <arqmamq/base32z.h>
+#include <arqmamq/base64.h>
+#include <arqmamq/hex.h>
 
 namespace arqma {
 

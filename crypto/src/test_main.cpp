@@ -1,7 +1,7 @@
 #include "channel_encryption.hpp"
 #include "arqmad_key.h"
 #include <iostream>
-#include <arqma-mq/hex.h>
+#include <arqmamq/hex.h>
 
 std::string printable(std::string_view in)
 {

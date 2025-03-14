@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <arqma-mq/auth.h>
+#include <arqmamq/auth.h>
 #include <unordered_map>
 
 #include "arqma_common.h"

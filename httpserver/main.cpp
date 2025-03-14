@@ -14,8 +14,8 @@
 #include "request_handler.h"
 
 #include <sodium/core.h>
-#include <arqma-mq/arqmamq.h>
-#include <arqma-mq/hex.h>
+#include <arqmamq/arqmamq.h>
+#include <arqmamq/hex.h>
 
 #include <csignal>
 #include <cstdlib>

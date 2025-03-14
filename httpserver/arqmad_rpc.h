@@ -2,8 +2,8 @@
 
 #include "arqmad_key.h"
 #include <string_view>
-#include <arqma-mq/arqmamq.h>
-#include <arqma-mq/hex.h>
+#include <arqmamq/arqmamq.h>
+#include <arqmamq/hex.h>
 
 namespace arqma {
 

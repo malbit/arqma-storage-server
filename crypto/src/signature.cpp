@@ -10,8 +10,8 @@ extern "C" {
 #include <sodium/crypto_scalarmult_ed25519.h>
 #include <sodium/randombytes.h>
 #include <sodium/utils.h>
-#include <arqma-mq/base32z.h>
-#include <arqma-mq/base64.h>
+#include <arqmamq/base32z.h>
+#include <arqmamq/base64.h>
 
 #include <algorithm>
 #include <cassert>

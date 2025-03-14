@@ -4,8 +4,8 @@
 #include "service_node.h"
 #include <boost/endian/conversion.hpp>
 #include <nlohmann/json.hpp>
-#include <arqma-mq/base64.h>
-#include <arqma-mq/variant.h>
+#include <arqmamq/base64.h>
+#include <arqmamq/variant.h>
 #include "onion_processing.h"
 #include "utils.hpp"
 #include "string_utils.hpp"
