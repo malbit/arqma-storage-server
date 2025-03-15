@@ -19,10 +19,9 @@ project(storage_server
 
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
+  set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)
 endif()
 
-cmake_policy(SET CMP0135 NEW)
-set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)
 if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
