@@ -31,10 +31,10 @@ set(LIBUV_MIRROR ${LOCAL_MIRROR} https://dist.libuv.org/dist/v${LIBUV_VERSION} C
 set(LIBUV_SOURCE libuv-v${LIBUV_VERSION}.tar.gz)
 set(LIBUV_HASH SHA512=33613fa28e8136507300eba374351774849b6b39aab4e53c997a918d3bc1d1094c6123e0e509535095b14dc5daa885eadb1a67bed46622ad3cc79d62dc817e84 CACHE STRING "libuv source hash")
 
-set(ZLIB_VERSION 1.2.11 CACHE STRING "zlib version")
+set(ZLIB_VERSION 1.3.1 CACHE STRING "zlib version")
 set(ZLIB_MIRROR ${LOCAL_MIRROR} https://zlib.net CACHE STRING "zlib mirror(s)")
 set(ZLIB_SOURCE zlib-${ZLIB_VERSION}.tar.gz)
-set(ZLIB_HASH SHA512=73fd3fff4adeccd4894084c15ddac89890cd10ef105dd5e1835e1e9bbb6a49ff229713bd197d203edfa17c2727700fce65a2a235f07568212d820dca88b528ae CACHE STRING "zlib source hash")
+set(ZLIB_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23 CACHE STRING "zlib source hash")
  
 set(CURL_VERSION 7.76.1 CACHE STRING "curl version")
 set(CURL_MIRROR ${LOCAL_MIRROR} https://curl.haxx.se/download https://curl.askapache.com CACHE STRING "curl mirror(s)")
