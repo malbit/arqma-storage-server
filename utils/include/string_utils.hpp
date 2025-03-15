@@ -131,11 +131,10 @@ T make_from_guts(std::basic_string_view<std::byte> s) {
 
 std::string lowercase_ascii_string(std::string_view src);
 
-/// Converts a duration into a human friendlier string.
 std::string friendly_duration(std::chrono::nanoseconds dur);
 
-/// Given an array of string arguments, look for strings of the format <prefix><value> and return <value>
-/// Returns empty string view if not found.
+std::string short_duration(std::chrono::duration<double> dur);
+
 template <typename It>
 std::string_view find_prefixed_value(It begin, It end, std::string_view prefix)
 {

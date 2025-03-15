@@ -23,8 +23,6 @@ uint64_t get_time_ms();
 
 std::mt19937_64& rng();
 
-uint64_t uniform_distribution_portable(uint64_t n);
-
 uint64_t uniform_distribution_portable(std::mt19937_64& mersenne_twister, uint64_t n);
 
 int get_fd_limit();

@@ -16,9 +16,12 @@ add_library(httpserver_lib STATIC
     arqmad_rpc.cpp
     server_certificates.cpp
     https_server.cpp
+    client_rpc_endpoints.cpp
     )
 
-target_compile_options(httpserver_lib PRIVATE -Wall -Werror)
+target_compile_options(httpserver_lib PRIVATE -Wall -Werror -Wno-deprecated-declarations)
+
+set_source_files_properties(server_certificates.cpp PROPERTIES COMPILE_FLAGS -Wno-error=deprecated-declarations)
 
 target_link_libraries(httpserver_lib
   PUBLIC
@@ -43,6 +46,7 @@ endif()
 set(BIN_NAME arqma-storage)
 
 add_executable(httpserver main.cpp)
+set_property(TARGET httpserver PROPERTY RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/binaries")
 set_target_properties(httpserver PROPERTIES OUTPUT_NAME ${BIN_NAME})
 target_link_libraries(httpserver PRIVATE httpserver_lib)
 install(TARGETS httpserver DESTINATION bin)

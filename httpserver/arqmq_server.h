@@ -13,6 +13,7 @@ namespace arqma {
 struct arqmad_key_pair_t;
 class ServiceNode;
 class RequestHandler;
+class RateLimiter;
 struct OnionRequestMetadata;
 
 void arqmq_logger(arqmamq::LogLevel level, const char* file, int line, std::string message);
@@ -23,18 +24,18 @@ class ArqmamqServer {
 
   ServiceNode* service_node_ = nullptr;
   RequestHandler* request_handler_ = nullptr;
+  RateLimiter* rate_limiter_ = nullptr;
 
   std::string peer_lookup(std::string_view pubkey_bin) const;
 
   void handle_sn_data(arqmamq::Message& message);
-  void handle_sn_proxy_exit(arqmamq::Message& message);
-  void handle_onion_req_v2(arqmamq::Message& message);
   void handle_onion_request(arqmamq::Message& message);
   void handle_onion_request(std::string_view payload, OnionRequestMetadata&& data, arqmamq::Message::DeferredSend send);
   void handle_ping(arqmamq::Message& message);
   void handle_storage_test(arqmamq::Message& message);
   void handle_get_logs(arqmamq::Message& message);
   void handle_get_stats(arqmamq::Message& message);
+  void handle_client_request(std::string_view method, arqmamq::Message& message);
 
   std::unordered_set<std::string> stats_access_keys_;
 
@@ -42,7 +43,7 @@ class ArqmamqServer {
 
 public:
   ArqmamqServer(const sn_record_t& me, const x25519_seckey& privkey, const std::vector<x25519_pubkey>& stats_access_keys_hex);
-  void init(ServiceNode* sn, RequestHandler* rh, arqmamq::address arqmad_rpc);
+  void init(ServiceNode* sn, RequestHandler* rh, RateLimiter* rl, arqmamq::address arqmad_rpc);
   arqmamq::ArqmaMQ& operator*() { return arqmq_; }
   arqmamq::ArqmaMQ* operator->() { return &arqmq_; }
 

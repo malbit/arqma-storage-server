@@ -3,6 +3,8 @@
 #include "Item.hpp"
 #include "arqma_common.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -19,36 +21,49 @@ class Database {
   public:
     inline static constexpr auto CLEANUP_PERIOD = 10s;
 
+    inline static constexpr int64_t PAGE_SIZE = 4096;
+    inline static constexpr int64_t SIZE_LIMIT = int64_t(3584) * 1024 * 1024; // 3.5 GB
+    inline static constexpr int64_t PAGE_LIMIT = SIZE_LIMIT / PAGE_SIZE;
+
     explicit Database(const std::filesystem::path& db_path);
     ~Database();
 
     enum class DuplicateHandling { IGNORE, FAIL };
 
-    bool store(const std::string& hash, const std::string& pubKey,
-               const std::string& bytes, uint64_t ttl, uint64_t timestamp,
-               const std::string& nonce,
+    bool store(std::string_view hash, std::string_view pubKey, std::string_view bytes,
+               std::chrono::system_clock::time_point timestamp, std::chrono::system_clock::time_point expiry,
                DuplicateHandling behaviour = DuplicateHandling::FAIL);
+
+    bool store(const storage::Item& item, DuplicateHandling behaviour = DuplicateHandling::FAIL)
+    {
+      return store(item.hash, item.pub_key, item.data, item.timestamp, item.expiration, behaviour);
+    }
+    bool store(const message_t& msg, DuplicateHandling behaviour = DuplicateHandling::FAIL)
+    {
+      return store(msg.hash, msg.pub_key, msg.data, msg.timestamp, msg.expiry, behaviour);
+    }
 
     bool bulk_store(const std::vector<storage::Item>& items);
 
     bool retrieve(const std::string& key, std::vector<storage::Item>& items,
                   const std::string& lastHash, int num_results = -1);
 
+    bool get_used_pages(uint64_t& count);
     // Return the total number of messages stored
     bool get_message_count(uint64_t& count);
 
-    // Get message by `index` (must be smaller than the result of
-    // `get_message_count`).
-    bool retrieve_by_index(uint64_t index, storage::Item& item);
+    bool retrieve_random(storage::Item& item);
 
     // Get message by `msg_hash`, return true if found
-    bool retrieve_by_hash(const std::string& msg_hash, storage::Item& item);
+    bool retrieve_by_hash(std::string_view msg_hash, storage::Item& item);
 
     void clean_expired();
 
   private:
     sqlite3_stmt* prepare_statement(const std::string& query);
     void open_and_prepare(const std::filesystem::path& db_path);
+
+    std::atomic<int> db_full_counter = 0;
 
     sqlite3* db;
     sqlite3_stmt* save_stmt;
@@ -57,9 +72,10 @@ class Database {
     sqlite3_stmt* get_all_stmt;
     sqlite3_stmt* get_stmt;
     sqlite3_stmt* get_row_count_stmt;
-    sqlite3_stmt* get_by_index_stmt;
+    sqlite3_stmt* get_random_stmt;
     sqlite3_stmt* get_by_hash_stmt;
     sqlite3_stmt* delete_expired_stmt;
+    sqlite3_stmt* page_count_stmt;
 };
 
 } // namespace arqma

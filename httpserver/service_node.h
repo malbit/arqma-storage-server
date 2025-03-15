@@ -70,19 +70,16 @@ class ServiceNode {
 
     reachability_testing reach_records_;
 
-    std::vector<message_t> relay_buffer_;
-
     mutable all_stats_t all_stats_;
     mutable std::recursive_mutex sn_mutex_;
     std::forward_list<std::future<void>> outstanding_https_reqs_;
-    void save_if_new(const message_t& msg);
 
     // Save items to the database, notifying listeners as necessary
     void save_bulk(const std::vector<storage::Item>& items);
 
-    void on_bootstrap_update(block_update_t& bu);
+    void on_bootstrap_update(block_update_t&& bu);
 
-    void on_swarm_update(block_update_t& bu);
+    void on_swarm_update(block_update_t&& bu);
 
     void bootstrap_data();
 
@@ -96,13 +93,10 @@ class ServiceNode {
 
     void relay_data_reliable(const std::string& blob, const sn_record_t& address) const;
 
-    template <typename Message>
-    void relay_messages(const std::vector<Message>& messages,
+    void relay_messages(const std::vector<storage::Item>& items,
                         const std::vector<sn_record_t>& snodes) const;
 
     void ping_peers();
-
-    void relay_buffered_messages();
 
     void arqmad_ping();
 
@@ -119,8 +113,6 @@ class ServiceNode {
 
     /// Check if it is our turn to test and initiate peer test if so
     void initiate_peer_test();
-
-    std::optional<storage::Item> select_random_message();
 
     void test_reachability(const sn_record_t& sn, int previous_failures);
 
@@ -150,7 +142,7 @@ class ServiceNode {
     bool shutting_down() const { return shutting_down_; }
 
     /// Process message received from a client, return false if not in a swarm
-    bool process_store(const message_t& msg);
+    bool process_store(message_t msg);
 
     /// Process incoming blob of messages: add to DB if new
     void process_push_batch(const std::string& blob);
@@ -187,6 +179,8 @@ class ServiceNode {
     void on_arqmad_connected();
 
     void update_swarms();
+
+    ArqmamqServer& arqmq_server() { return arqmq_server_; }
 };
 
 } // namespace arqma

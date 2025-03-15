@@ -35,6 +35,7 @@ public:
     HTTPSServer(
         ServiceNode& sn,
         RequestHandler& rh,
+        RateLimiter& rl,
         std::vector<std::tuple<std::string, uint16_t, bool>> bind,
         const std::filesystem::path& ssl_cert,
         const std::filesystem::path& ssl_key,
@@ -129,9 +130,9 @@ private:
     // Request handler
     RequestHandler& request_handler_;
 
+    RateLimiter& rate_limiter_;
+
     legacy_keypair legacy_keys_;
-    // Rate limiter for direct client requests
-    RateLimiter rate_limiter_{arqmq_};
     // Certificate signature of the cert.pem so that the client can verify who they are talking to
     std::string cert_signature_;
 

@@ -17,6 +17,7 @@ class RateLimiter {
     // TODO: make those two constants command line parameters?
     inline constexpr static uint32_t BUCKET_SIZE = 600;
     inline constexpr static uint32_t TOKEN_RATE = 300;
+    inline constexpr static uint32_t TOKEN_RATE_US = 600;
     inline constexpr static uint32_t MAX_CLIENTS = 10000;
 
     RateLimiter() = delete;
@@ -24,6 +25,7 @@ class RateLimiter {
 
     bool should_rate_limit(const legacy_pubkey& pubkey, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
     bool should_rate_limit_client(uint32_t ip, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    bool should_rate_limit_client(const std::string& ip_dotted_quad, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
   private:
     struct TokenBucket {

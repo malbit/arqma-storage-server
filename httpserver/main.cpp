@@ -169,9 +169,11 @@ int main(int argc, char* argv[])
 
         RequestHandler request_handler{service_node, channel_encryption};
 
-        HTTPSServer https_server{service_node, request_handler, {{options.ip, options.port, true}}, ssl_cert, ssl_key, ssl_dh, {me.pubkey_legacy, private_key}};
+        RateLimiter rate_limiter{*arqmamq_server};
 
-        arqmamq_server.init(&service_node, &request_handler, arqmamq::address{options.arqmad_arqmq_rpc});
+        HTTPSServer https_server{service_node, request_handler, rate_limiter, {{options.ip, options.port, true}}, ssl_cert, ssl_key, ssl_dh, {me.pubkey_legacy, private_key}};
+
+        arqmamq_server.init(&service_node, &request_handler, &rate_limiter, arqmamq::address{options.arqmad_arqmq_rpc});
 
         https_server.start();
 

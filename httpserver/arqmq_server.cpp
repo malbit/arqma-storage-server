@@ -5,13 +5,13 @@
 #include "arqma_logger.h"
 #include "arqmad_key.h"
 #include "channel_encryption.hpp"
-#include "arqma-mq/connection.h"
-#include "arqma-mq/arqmamq.h"
+#include "rate_limiter.h"
 #include "service_node.h"
 #include "request_handler.h"
 
-#include <arqmamq/hex.h>
 #include <nlohmann/json.hpp>
+#include <arqmamq/hex.h>
+#include <arqmamq/arqmamq.h>
 
 #include <optional>
 
@@ -52,46 +52,6 @@ void ArqmamqServer::handle_sn_data(arqmamq::Message& message)
     message.send_reply();
 };
 
-static std::optional<x25519_pubkey> extract_x25519_from_hex(std::string_view hex)
-{
-  try
-  {
-    return x25519_pubkey::from_hex(hex);
-  } catch (const std::exception& e) {
-    ARQMA_LOG(warn, "Failed to decode client key: {}", e.what());
-  }
-  return std::nullopt;
-}
-
-void ArqmamqServer::handle_sn_proxy_exit(arqmamq::Message& message)
-{
-    ARQMA_LOG(debug, "[ARQMQ] handle_sn_proxy_exit");
-    ARQMA_LOG(debug, "[ARQMQ] thread id: {}", std::this_thread::get_id());
-    ARQMA_LOG(debug, "[ARQMQ] from: {}", arqmamq::to_hex(message.conn.pubkey()));
-
-    if (message.data.size() != 2)
-    {
-        ARQMA_LOG(debug, "Expected 2 message parts, got {}", message.data.size());
-        return;
-    }
-
-    auto client_key = extract_x25519_from_hex(message.data[0]);
-    if (!client_key) return;
-    const auto& payload = message.data[1];
-
-    request_handler_->process_proxy_exit(*client_key, payload, [send=message.send_later()](arqma::Response res)
-    {
-      ARQMA_LOG(debug, "  Proxy exit status: {}", res.status.first);
-      if (res.status == http::OK)
-      {
-        send.reply(res.body);
-      } else {
-        send.reply(std::to_string(res.status.first), res.body);
-        ARQMA_LOG(debug, "Error: status {} != OK for proxy_exit", res.status.first);
-      }
-    });
-}
-
 void ArqmamqServer::handle_ping(arqmamq::Message& message)
 {
   ARQMA_LOG(debug, "Remote pinged me");
@@ -123,7 +83,7 @@ void ArqmamqServer::handle_storage_test(arqmamq::Message& message)
     return message.send_reply("invalid pubkey");
   }
 
-  uint64_t height
+  uint64_t height;
   if (!util::parse_int(message.data[0], height) || !height)
   {
     ARQMA_LOG(warn, "invalid sn.storage_test arqmq request from {}@{}: '{}' is not a valid height", tester_pk, message.remote, height);
@@ -156,7 +116,7 @@ void ArqmamqServer::handle_storage_test(arqmamq::Message& message)
   });
 }
 
-void ArqmamqServer::handle_onion_request(std::string_view payload, OnionRequestMetadata&& data, arqmamq::Message::DefferedSend send)
+void ArqmamqServer::handle_onion_request(std::string_view payload, OnionRequestMetadata&& data, arqmamq::Message::DeferredSend send)
 {
     data.cb = [send](arqma::Response res)
     {
@@ -169,7 +129,7 @@ void ArqmamqServer::handle_onion_request(std::string_view payload, OnionRequestM
     if (data.hop_no > MAX_ONION_HOPS)
       return data.cb({http::BAD_REQUEST, "onion request max path length exceeded"});
 
-    request_handler_->process_onion_req(rayload, std::move(data));
+    request_handler_->process_onion_req(payload, std::move(data));
 }
 
 void ArqmamqServer::handle_onion_request(arqmamq::Message& message)
@@ -178,7 +138,7 @@ void ArqmamqServer::handle_onion_request(arqmamq::Message& message)
   try
   {
     if (message.data.size() != 1)
-      thrown std::runtime_error{"expected 1 part, got " + std::to_string(message.data.size())};
+      throw std::runtime_error{"expected 1 part, got " + std::to_string(message.data.size())};
 
     data = decode_onion_data(message.data[0]);
   }
@@ -186,34 +146,11 @@ void ArqmamqServer::handle_onion_request(arqmamq::Message& message)
   {
     auto msg = "Invalid internal onion request: "s + e.what();
     ARQMA_LOG(err, msg);
-    message.send_reply(std::to_string(http::BAD_REQUEST), msg);
+    message.send_reply(std::to_string(http::BAD_REQUEST.first), msg);
     return;
   }
 
   handle_onion_request(data.first, std::move(data.second), message.send_later());
-}
-
-void ArqmamqServer::handle_onion_req_v2(arqmamq::Message& message)
-{
-  ARQMA_LOG(debug, "Got v2 onion request over ArqmaMQ");
-
-  constexpr int bad_code = http::BAD_REQUEST.first;
-  if (message.data.size() != 2)
-  {
-    ARQMA_LOG(err, "Expected 2 message parts, got {}", message.data.size());
-    message.send_reply(std::to_string(bad_code), "Incorrect number of onion request message parts");
-    return;
-  }
-
-  auto eph_key = extract_x25519_from_hex(message.data[0]);
-  if (!eph_key)
-  {
-    ARQMA_LOG(err, "no ephemeral key in arqmq onion request");
-    message.send_reply(std::to_string(bad_code), "Missing ephemeral key");
-    return;
-  }
-
-  handle_onion_request(message.data[1], {*eph_key, nullptr, 1, EncryptType::aes_gcm}, message.send_later());
 }
 
 void ArqmamqServer::handle_get_logs(arqmamq::Message& message)
@@ -243,6 +180,47 @@ void ArqmamqServer::handle_get_stats(arqmamq::Message& message)
   message.send_reply(payload);
 }
 
+void ArqmamqServer::handle_client_request(std::string_view method, arqmamq::Message& message)
+{
+  ARQMA_LOG(debug, "Handling AMQ RPC request for {}", method);
+  auto it = RequestHandler::client_rpc_endpoints.find(method);
+  assert(it != RequestHandler::client_rpc_endpoints.end());
+
+  if (message.data.size() != 1)
+  {
+    ARQMA_LOG(warn, "Invalid AMQ RPC request for {}: incorrect number of message parts ({})", method, message.data.size());
+    message.send_reply(std::to_string(http::BAD_REQUEST.first), "Invalid request: expected 1 message part, received " + std::to_string(message.data.size()));
+    return;
+  }
+
+  if (rate_limiter_->should_rate_limit_client(message.remote))
+  {
+    ARQMA_LOG(debug, "Rate limiting client request from {}", message.remote);
+    return message.send_reply(std::to_string(http::TOO_MANY_REQUESTS.first), "Too many requests, try again later");
+  }
+
+  auto params = nlohmann::json::parse(message.data[0], nullptr, false);
+  if (params.is_discarded())
+  {
+    ARQMA_LOG(debug, "Bad AMQ storage RPC request: invalid json");
+    return message.send_reply(std::to_string(http::BAD_REQUEST.first), "invalid json");
+  }
+
+  it->second(*request_handler_, params, [send=message.send_later()](arqma::Response res)
+  {
+    if (res.status == http::OK)
+    {
+      ARQMA_LOG(debug, "AMQ RPC request successful, returning {}-byte response", res.body.size());
+      send.reply(std::move(res.body));
+    }
+    else
+    {
+      ARQMA_LOG(debug, "AMQ RPC request failed, replying with [{}, {}]", res.status.first, res.body);
+      send.reply(std::to_string(res.status.first), res.body);
+    }
+  });
+}
+
 void arqmq_logger(arqmamq::LogLevel level, const char* file, int line, std::string message)
 {
 #define AMQ_LOG_MAP(AMQ_LVL, SS_LVL)                        \
@@ -255,8 +233,8 @@ void arqmq_logger(arqmamq::LogLevel level, const char* file, int line, std::stri
       AMQ_LOG_MAP(fatal, critical);
       AMQ_LOG_MAP(error, err);
       AMQ_LOG_MAP(warn, warn);
-      ARQ_LOG_MAP(info, info);
-      ARQ_LOG_MAP(trace, trace);
+      AMQ_LOG_MAP(info, info);
+      AMQ_LOG_MAP(trace, trace);
       AMQ_LOG_MAP(debug, debug);
     }
 #undef AMQ_LOG_MAP
@@ -264,7 +242,7 @@ void arqmq_logger(arqmamq::LogLevel level, const char* file, int line, std::stri
 
 ArqmamqServer::ArqmamqServer(
                const sn_record_t& me,
-               const x25519_seckey& privkey;
+               const x25519_seckey& privkey,
                const std::vector<x25519_pubkey>& stats_access_keys) :
       arqmq_{
            std::string{me.pubkey_x25519.view()},
@@ -287,10 +265,13 @@ ArqmamqServer::ArqmamqServer(
 
   arqmq_.add_category("sn", arqmamq::Access{arqmamq::AuthLevel::none, true, false}, 2, 1000)
         .add_request_command("data", [this](auto& m) { handle_sn_data(m); })
-        .add_request_command("proxy_exit", [this](auto& m) { handle_sn_proxy_exit(m); })
         .add_request_command("ping", [this](auto& m) { handle_ping(m); })
         .add_request_command("storage_test", [this](auto& m) { handle_storage_test(m); })
         .add_request_command("onion_request", [this](auto& m) { handle_onion_request(m); });
+
+  auto st_cat = arqmq_.add_category("storage", arqmamq::AuthLevel::none, 1, 200);
+  for (const auto& [name, _cb] : RequestHandler::client_rpc_endpoints)
+    st_cat.add_request_command(std::string{name}, [this, name=name](auto& m) { handle_client_request(name, m); });
 
   arqmq_.add_category("service", arqmamq::AuthLevel::admin)
         .add_request_command("get_stats", [this](auto& m) { handle_get_stats(m); })
@@ -327,18 +308,19 @@ void ArqmamqServer::connect_arqmad(const arqmamq::address& arqmad_rpc)
     arqmamq::AuthLevel::admin);
 }
 
-void ArqmamqServer::init(ServiceNode* sn, RequestHandler* rh, arqmamq::address arqmad_rpc)
+void ArqmamqServer::init(ServiceNode* sn, RequestHandler* rh, RateLimiter* rl, arqmamq::address arqmad_rpc)
 {
   assert(!service_node_);
   service_node_ = sn;
   request_handler_ = rh;
+  rate_limiter_ = rl;
   arqmq_.start();
   connect_arqmad(arqmad_rpc);
 }
 
 std::string ArqmamqServer::encode_onion_data(std::string_view payload, const OnionRequestMetadata& data)
 {
-  return arqmamq::bt_serialize<arqmqmq::bt_dict>({
+  return arqmamq::bt_serialize<arqmamq::bt_dict>({
       {"data", payload},
       {"enc_type", to_string(data.enc_type)},
       {"ephemeral_key", data.ephem_key.view()},

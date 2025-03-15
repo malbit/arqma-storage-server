@@ -68,7 +68,7 @@ auto process_inner_request(std::string plaintext) -> ParsedInfo
 
 ParsedInfo process_ciphertext_v2(const ChannelEncryption& decryptor, std::string_view ciphertext, const x25519_pubkey& ephem_key, EncryptType enc_type)
 {
-  std:optional<std::string> plaintext;
+  std::optional<std::string> plaintext;
 
   try
   {
@@ -81,12 +81,12 @@ ParsedInfo process_ciphertext_v2(const ChannelEncryption& decryptor, std::string
   if (!plaintext)
     return ProcessCiphertextError::INVALID_CIPHERTEXT;
 
-  ARQMA_LOG(debug, "onion request decrypted: (len: {})", plaintext.size());
+  ARQMA_LOG(debug, "onion request decrypted: (len: {})", plaintext->size());
 
-  return process_inner_requesrt(std::move(*plaintext));
+  return process_inner_request(std::move(*plaintext));
 }
 
-bool is_onion_url_target_allowed(std::string_view url)
+bool is_onion_url_target_allowed(std::string_view target)
 {
   return util::starts_with(target, "/arqma/") && util::ends_with(target, "/lsrpc") && target.find('?') == std::string::npos;
 }

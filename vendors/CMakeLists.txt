@@ -83,7 +83,7 @@ add_library(uSockets STATIC EXCLUDE_FROM_ALL ${usockets_src})
 target_include_directories(uSockets PRIVATE uWebSockets/uSockets/src)
 target_compile_definitions(uSockets PRIVATE LIBUS_USE_OPENSSL)
 target_compile_features(uSockets PRIVATE c_std_11 cxx_std_17)
-target_link_libraries(uSockets OpenSSL:SSL OpenSSL::Crypto)
+target_link_libraries(uSockets OpenSSL::SSL OpenSSL::Crypto)
 
 if(WIN32 OR (APPLE AND NOT IOS))
   if(BUILD_STATIC_DEPS)

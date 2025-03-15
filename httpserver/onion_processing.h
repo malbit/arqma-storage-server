@@ -56,6 +56,6 @@ auto parse_combined_payload(std::string_view payload) -> CiphertextPlusJson;
 
 auto process_inner_request(std::string plaintext) -> ParsedInfo;
 
-bool is_onion_url_target_allowed(std::string_view url);
+bool is_onion_url_target_allowed(std::string_view uri);
 
 }

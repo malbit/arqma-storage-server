@@ -52,6 +52,7 @@ void HTTPSServer::handle_cors(HttpRequest& req, http::headers& extra_headers) {
 HTTPSServer::HTTPSServer(
         ServiceNode& sn,
         RequestHandler& rh,
+        RateLimiter& rl,
         std::vector<std::tuple<std::string, uint16_t, bool>> bind,
         const std::filesystem::path& ssl_cert,
         const std::filesystem::path& ssl_key,
@@ -61,6 +62,7 @@ HTTPSServer::HTTPSServer(
     service_node_{sn},
     arqmq_{*service_node_.arqmq_server()},
     request_handler_{rh},
+    rate_limiter_{rl},
     legacy_keys_{std::move(legacy_keys)},
     cert_signature_{arqmamq::to_base64(util::view_guts(
         generate_signature(hash_data(slurp_file(ssl_cert)), legacy_keys_)
@@ -163,7 +165,7 @@ void HTTPSServer::add_generic_headers(HttpResponse& res) const {
 
 void queue_response_internal(HTTPSServer& https, HttpResponse& r, Response res, bool force_close = false)
 {
-  r.cork([&https, &r, res=std::move(res), force_close)
+  r.cork([&https, &r, res=std::move(res), force_close]
   {
     r.writeStatus(std::to_string(res.status.first) + " " + std::string{res.status.second});
     https.add_generic_headers(r);
@@ -172,7 +174,7 @@ void queue_response_internal(HTTPSServer& https, HttpResponse& r, Response res, 
     for (const auto& [h, v] : res.headers)
       r.writeHeader(h, v);
 
-    r.end(res.body, force_clone || https.closing());
+    r.end(res.body, force_close || https.closing());
   });
 }
 
@@ -280,7 +282,7 @@ namespace {
             result << ']';
         }
         else
-            result << "{unknown:" << oxenmq::to_hex(addr) << "}";
+            result << "{unknown:" << arqmamq::to_hex(addr) << "}";
         return result.str();
     }
 
@@ -425,7 +427,7 @@ static std::variant<legacy_pubkey, Response> validate_snode_signature(ServiceNod
   if (!sn.find_node(pubkey))
   {
     ARQMA_LOG(debug, "Rejecting signature from unknown service node: {}", pubkey);
-    return Response{http::UNATHORIZED, "Unknown service node"};
+    return Response{http::UNAUTHORIZED, "Unknown service node"};
   }
 
   if (!prevalidate)
@@ -433,7 +435,7 @@ static std::variant<legacy_pubkey, Response> validate_snode_signature(ServiceNod
     if (!check_signature(sig, hash_data(r.body), pubkey))
     {
       ARQMA_LOG(debug, "Snode signature verification failed for pubkey {}", pubkey);
-      return Response{http::UNATHRORIZED, "Snode signature verification failed"};
+      return Response{http::UNAUTHORIZED, "Snode signature verification failed"};
     }
   }
   return pubkey;
@@ -504,7 +506,7 @@ void HTTPSServer::process_storage_test_req(HttpRequest& req, HttpResponse& res) 
             } catch (...) {
                 resp.body = "Bad snode test request: missing fields in json";
                 ARQMA_LOG(debug, resp.body);
-                return queue_response(std::move(data), td::move(resp));
+                return queue_response(std::move(data), std::move(resp));
             }
 
             request_handler_.process_storage_test_req(height, tester_pk, msg_hash, [data=std::move(data), resp=std::move(resp)](MessageTestStatus status, std::string answer, std::chrono::steady_clock::duration elapsed) mutable
@@ -583,7 +585,7 @@ void HTTPSServer::process_onion_req_v2(HttpRequest& req, HttpResponse& res) {
             (std::shared_ptr<call_data> data) mutable {
         auto& arqmq = data->arqmq;
         auto& request = data->request;
-        data->arqmq.inject_task("https", "https:" + request.uri, request.remote_addr,
+        arqmq.inject_task("https", "https:" + request.uri, request.remote_addr,
                 [this, data=std::move(data), started] () mutable {
 
             if (data->replied || data->aborted) return;
@@ -674,4 +676,4 @@ HTTPSServer::~HTTPSServer()
 }
 
 
-} // namespace oxen
+} // namespace arqma

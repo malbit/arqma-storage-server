@@ -1,28 +1,44 @@
 #pragma once
 
-#include <cstdint>
+#include <chrono>
 #include <string>
+#include "arqma_common.h"
 
-namespace arqma {
-namespace storage {
+namespace arqma::storage {
 
 struct Item {
-    Item(const std::string& hash, const std::string& pubKey, uint64_t timestamp,
-         uint64_t ttl, uint64_t expirationTimestamp, const std::string& nonce,
-         const std::string& bytes)
-        : hash(hash), pub_key(pubKey), timestamp(timestamp), ttl(ttl),
-          expiration_timestamp(expirationTimestamp), nonce(nonce), data(bytes) {
-    }
-    Item() = default;
-    std::string hash;
-    std::string pub_key;
-    uint64_t timestamp;
-    uint64_t ttl;
-    uint64_t expiration_timestamp;
-    std::string nonce;
-    std::string data;
+  std::string hash;
+  std::string pub_key;
+  std::chrono::system_clock::time_point timestamp;
+  std::chrono::system_clock::time_point expiration;
+  std::string data;
+
+  Item() = default;
+  Item(std::string hash, std::string pub_key, std::chrono::system_clock::time_point timestamp,
+       std::chrono::system_clock::time_point expiration, std::string data)
+    : hash{std::move(hash)},
+      pub_key{std::move(pub_key)},
+      timestamp{std::move(timestamp)},
+      expiration{std::move(expiration)},
+      data{std::move(data)}
+  {}
+
+  explicit Item(message_t&& msg)
+    : hash{std::move(msg.hash)}, pub_key{std::move(msg.pub_key)}, timestamp{std::move(msg.timestamp)},
+      expiration{std::move(msg.expiry)}, data{std::move(msg.data)}
+  {}
+  explicit Item(const message_t& msg)
+    : hash{msg.hash}, pub_key{msg.pub_key}, timestamp{msg.timestamp}, expiration{msg.expiry}, data{msg.data}
+  {}
+
+  explicit operator message_t() const &
+  {
+    return {pub_key, data, hash, timestamp, expiration};
+  }
+  explicit operator message_t() &&
+  {
+    return {std::move(pub_key), std::move(data), std::move(hash), std::move(timestamp), std::move(expiration)};
+  }
 };
 
-} // namespace storage
-
-} // namespace arqma
+} // namespace arqma::storage

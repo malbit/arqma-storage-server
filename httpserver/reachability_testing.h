@@ -24,8 +24,8 @@ struct nth_greater {
 };
 
 struct incoming_test_state {
-  time_point_t last_test{};
-  time_point_t last_whine{};
+  std::chrono::steady_clock::time_point last_test{};
+  std::chrono::steady_clock::time_point last_whine{};
   bool was_failing = false;
 };
 
@@ -45,25 +45,27 @@ class reachability_testing {
     inline static constexpr auto MAX_TIME_WITHOUT_PING = 2min;
     inline static constexpr auto WHINING_INTERVAL = 2min;
 
+    using clock = std::chrono::steady_clock;
+
   private:
     std::vector<legacy_pubkey> testing_queue;
-    time_point_t next_general_test = time_point_t::min();
-    const time_point_t startup = std::chrono::steady_clock::now();
+    clock::time_point next_general_test = clock::time_point::min();
+    const clock::time_point startup = clock::now();
 
-    using FailingPK = std::tuple<legacy_pubkey, time_point_t, int>;
+    using FailingPK = std::tuple<legacy_pubkey, clock::time_point, int>;
     std::priority_queue<FailingPK, std::vector<FailingPK>, detail::nth_greater<FailingPK, 1>> failing_queue;
     std::unordered_set<legacy_pubkey> failing;
 
     detail::incoming_test_state last_https;
-    detail::incoming_test_state last_amq;
+    detail::incoming_test_state last_arqmq;
 
   public:
 
-    std::optional<sn_record_t> next_random(const Swarm& swarm, const time_point_t& now = std::chrono::steady_clock::now(), bool requeue = true);
-    std::vector<std::pair<sn_record_t, int>> get_failing(const Swarm& swarm, const time_point_t& now = std::chrono::steady_clock::now());
+    std::optional<sn_record_t> next_random(const Swarm& swarm, const clock::time_point& now = clock::now(), bool requeue = true);
+    std::vector<std::pair<sn_record_t, int>> get_failing(const Swarm& swarm, const clock::time_point& now = clock::now());
     void add_failing_node(const legacy_pubkey& pk, int previous_failures = 0);
-    void incoming_ping(ReachType type, const time_point_t& now = std::chrono::steady_clock::now());
-    void check_incoming_tests(const time_point_t& now = std::chrono::steady_clock::now());
+    void incoming_ping(ReachType type, const clock::time_point& now = clock::now());
+    void check_incoming_tests(const clock::time_point& now = clock::now());
 };
 
 } // namespace arqma

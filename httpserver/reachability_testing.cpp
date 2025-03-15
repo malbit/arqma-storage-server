@@ -11,7 +11,10 @@ namespace arqma {
 using fseconds = std::chrono::duration<float, std::chrono::seconds::period>;
 using fminutes = std::chrono::duration<float, std::chrono::minutes::period>;
 
-static void check_incoming_tests_impl(std::string_view name, const time_point_t& now, const time_point_t& startup, detail::incoming_test_state& incoming)
+static void check_incoming_tests_impl(std::string_view name,
+                                      const reachability_testing::clock::time_point& now,
+                                      const reachability_testing::clock::time_point& startup,
+                                      detail::incoming_test_state& incoming)
 {
   const auto elapsed = now - std::max(startup, incoming.last_test);
   bool failing = elapsed > reachability_testing::MAX_TIME_WITHOUT_PING;
@@ -41,22 +44,22 @@ static void check_incoming_tests_impl(std::string_view name, const time_point_t&
   }
 }
 
-void reachability_testing::check_incoming_tests(const time_point_t& now)
+void reachability_testing::check_incoming_tests(const clock::time_point& now)
 {
   check_incoming_tests_impl("HTTP", now, startup, last_https);
-  check_incoming_tests_impl("ArqmaMQ", now, startup, last_amq);
+  check_incoming_tests_impl("ArqmaMQ", now, startup, last_arqmq);
 }
 
-void reachability_testing::incoming_ping(ReachType type, const time_point_t& now)
+void reachability_testing::incoming_ping(ReachType type, const clock::time_point& now)
 {
-  (type == ReachType::AMQ ? last_amq : last_https).last_test = now;
+  (type == ReachType::AMQ ? last_arqmq : last_https).last_test = now;
 }
 
-std::optional<sn_record_t> reachability_testing::next_random(const Swarm& swarm, const time_point_t& now, bool requeue)
+std::optional<sn_record_t> reachability_testing::next_random(const Swarm& swarm, const clock::time_point& now, bool requeue)
 {
   if (next_general_test > now)
     return std::nullopt;
-  next_general_test = now + std::chrono::duration_cast<time_point_t::duration>(fseconds(TESTING_INTERVAL(util::rng())));
+  next_general_test = now + std::chrono::duration_cast<clock::duration>(fseconds(TESTING_INTERVAL(util::rng())));
 
   auto& my_pk = swarm.our_address().pubkey_legacy;
   while (!testing_queue.empty())
@@ -83,7 +86,7 @@ std::optional<sn_record_t> reachability_testing::next_random(const Swarm& swarm,
   return next_random(swarm, now, false);
 }
 
-std::vector<std::pair<sn_record_t, int>> reachability_testing::get_failing(const Swarm& swarm, const time_point_t& now)
+std::vector<std::pair<sn_record_t, int>> reachability_testing::get_failing(const Swarm& swarm, const clock::time_point& now)
 {
   std::vector<std::pair<sn_record_t, int>> result;
   while (result.size() < MAX_RETESTS_PER_TICK && !failing_queue.empty())
@@ -105,7 +108,7 @@ void reachability_testing::add_failing_node(const legacy_pubkey& pk, int previou
 
   if (previous_failures < 0)
     previous_failures = 0;
-  auto next_test_in = duration_cast<time_point_t::duration>(previous_failures * TESTING_BACKOFF + fseconds{TESTING_INTERVAL(util::rng())});
+  auto next_test_in = duration_cast<clock::duration>(previous_failures * TESTING_BACKOFF + fseconds{TESTING_INTERVAL(util::rng())});
   if (next_test_in > TESTING_BACKOFF_MAX)
     next_test_in = TESTING_BACKOFF_MAX;
 

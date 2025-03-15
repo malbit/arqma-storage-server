@@ -2,11 +2,19 @@
 
 #include "arqma_common.h"
 #include "sn_record.h"
-#include <deque>
-#include <unordered_map>
+
 #include <atomic>
+#include <chrono>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
+
+namespace arqmamq { class ArqmaMQ; }
 
 namespace arqma {
+
+inline constexpr std::chrono::seconds STATS_CLEANUP_INTERVAL = 10min;
+inline constexpr size_t RECENT_STATS_COUNT = 6;
 
 struct time_entry_t {
     time_t timestamp;
@@ -15,13 +23,11 @@ struct time_entry_t {
 enum class ResultType { OK, MISMATCH, OTHER, REJECTED };
 
 struct test_result_t {
-
-    // seconds since Epoch when entry was recorded
-    time_t timestamp;
+    std::chrono::system_clock::time_point timestamp;
     ResultType result;
 };
 
-inline const char* to_str(ResultType result) {
+inline constexpr const char* to_str(ResultType result) {
   switch (result) {
     case ResultType::OK: return "OK";
     case ResultType::MISMATCH: return "MISMATCH";
@@ -43,104 +49,87 @@ struct peer_stats_t {
     std::deque<test_result_t> storage_tests;
 };
 
+struct period_stats {
+  uint64_t
+    client_store_requests = 0,
+    client_retrieve_requests = 0,
+    proxy_requests = 0,
+    onion_requests = 0;
+};
+
 class all_stats_t {
+  std::atomic<uint64_t>
+    total_client_store_requests{0},
+    current_client_store_requests{0},
+    total_client_retrieve_requests{0},
+    current_client_retrieve_requests{0},
+    total_proxy_requests{0},
+    current_proxy_requests{0},
+    total_onion_requests{0},
+    current_onion_requests{0};
 
-    // ===== This node's stats =====
-    uint64_t total_client_store_requests = 0;
-    // Number of requests in the latest x min interval
-    uint64_t previous_period_store_requests = 0;
-    // Number of requests after the latest x min interval
-    uint64_t recent_store_requests = 0;
+  std::deque<std::pair<std::chrono::steady_clock::time_point, period_stats>> previous_stats;
+  std::chrono::steady_clock::time_point last_rotate = std::chrono::steady_clock::now();
+  mutable std::mutex prev_stats_mutex;
+  std::unordered_map<legacy_pubkey, peer_stats_t> peer_report_;
+  mutable std::mutex peer_report_mutex;
 
-    uint64_t total_client_retrieve_requests = 0;
-    // Number of requests in the latest x min interval
-    uint64_t previous_period_retrieve_requests = 0;
-    // Number of requests after the latest x min interval
-    uint64_t recent_retrieve_requests = 0;
+  void cleanup();
 
-    uint64_t previous_period_proxy_requests = 0;
-    std::atomic<uint64_t> recent_proxy_requests{0};
+public:
+  explicit all_stats_t(arqmamq::ArqmaMQ& arqmq);
 
-    uint64_t previous_period_onion_requests = 0;
-    std::atomic<uint64_t> recent_onion_requests{0};
+  void record_request_failed(const legacy_pubkey& sn)
+  {
+    std::lock_guard lock{peer_report_mutex};
+    peer_report_[sn].requests_failed++;
+  }
 
-    time_point_t reset_time_ = std::chrono::steady_clock::now();
-    // =============================
+  void record_push_failed(const legacy_pubkey& sn)
+  {
+    std::lock_guard lock{peer_report_mutex};
+    peer_report_[sn].pushes_failed++;
+  }
 
-    /// update period moving recent request counters to
-    /// the `previous period`
-    void next_period() {
-        previous_period_store_requests = recent_store_requests;
-        previous_period_retrieve_requests = recent_retrieve_requests;
-        previous_period_proxy_requests = recent_proxy_requests.load();
-        previous_period_onion_requests = recent_onion_requests.load();
-        recent_store_requests = 0;
-        recent_retrieve_requests = 0;
-        recent_proxy_requests = 0;
-        recent_onion_requests = 0;
-    }
+  void record_storage_test_result(const legacy_pubkey& sn, ResultType result)
+  {
+    std::lock_guard lock{peer_report_mutex};
+    peer_report_[sn].storage_tests.push_back({std::chrono::system_clock::now(), result});
+  }
 
-  public:
-    // stats per every peer in our swarm (including former peers)
-    std::unordered_map<legacy_pubkey, peer_stats_t> peer_report_;
+  std::unordered_map<legacy_pubkey, peer_stats_t> peer_report() const
+  {
+    std::lock_guard lock{peer_report_mutex};
+    return peer_report_;
+  }
 
-    void record_request_failed(const legacy_pubkey& sn) {
-        peer_report_[sn].requests_failed++;
-    }
+  void bump_proxy_requests()
+  {
+    total_proxy_requests++;
+    current_proxy_requests++;
+  }
+  void bump_onion_requests()
+  {
+    total_onion_requests++;
+    current_onion_requests++;
+  }
+  void bump_store_requests()
+  {
+    total_client_store_requests++;
+    current_client_store_requests++;
+  }
+  void bump_retrieve_requests()
+  {
+    total_client_retrieve_requests++;
+    current_client_retrieve_requests++;
+  }
 
-    void record_push_failed(const legacy_pubkey& sn) {
-        peer_report_[sn].pushes_failed++;
-    }
+  uint64_t get_total_proxy_requests() const { return total_proxy_requests; }
+  uint64_t get_total_onion_requests() const { return total_onion_requests; }
+  uint64_t get_total_store_requests() const { return total_client_store_requests; }
+  uint64_t get_total_retrieve_requests() const { return total_client_retrieve_requests; }
 
-    void record_storage_test_result(const legacy_pubkey& sn, ResultType result) {
-        test_result_t res = {std::time(nullptr), result};
-        peer_report_[sn].storage_tests.push_back(res);
-    }
-
-    // remove old test entries and reset counters, update reset time
-    void cleanup();
-
-    void bump_proxy_requests() { recent_proxy_requests++; }
-    void bump_onion_requests() { recent_onion_requests++; }
-
-    void bump_store_requests() {
-        total_client_store_requests++;
-        recent_store_requests++;
-    }
-
-    void bump_retrieve_requests() {
-        total_client_retrieve_requests++;
-        recent_retrieve_requests++;
-    }
-
-    uint64_t get_total_store_requests() const {
-        return total_client_store_requests;
-    }
-
-    uint64_t get_recent_store_requests() const { return recent_store_requests; }
-
-    uint64_t get_recent_proxy_requests() const { return recent_proxy_requests; }
-    uint64_t get_previous_period_proxy_requests() const { return previous_period_proxy_requests; }
-    uint64_t get_recent_onion_requests() const { return recent_onion_requests; }
-    uint64_t get_previous_onion_proxy_requests() const { return previous_period_onion_requests; }
-
-    uint64_t get_previous_period_store_requests() const {
-        return previous_period_store_requests;
-    }
-
-    uint64_t get_total_retrieve_requests() const {
-        return total_client_retrieve_requests;
-    }
-
-    uint64_t get_recent_retrieve_requests() const {
-        return recent_retrieve_requests;
-    }
-
-    uint64_t get_previous_period_retrieve_requests() const {
-        return previous_period_retrieve_requests;
-    }
-
-    time_point_t get_reset_time() const { return reset_time_; }
+  std::pair<std::chrono::steady_clock::duration, period_stats> get_recent_requests() const;
 };
 
 } // namespace arqma

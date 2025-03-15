@@ -29,12 +29,8 @@ namespace arqma {
 
 using storage::Item;
 
-constexpr std::chrono::milliseconds RELAY_INTERVAL = 350ms;
-
 using MISSING_PUBKEY_THRESHOLD = std::ratio<3, 100>;
 
-/// TODO: there should be config.h to store constants like these
-constexpr std::chrono::seconds STATS_CLEANUP_INTERVAL = 60min;
 constexpr std::chrono::seconds ARQMAD_PING_INTERVAL = 30s;
 constexpr int CLIENT_RETRIEVE_MESSAGE_LIMIT = 100;
 
@@ -47,15 +43,14 @@ ServiceNode::ServiceNode(sn_record_t address,
     db_{std::make_unique<Database>(db_location)},
     our_address_{std::move(address)},
     our_seckey_{skey},
-    arqmq_server_{arqmq_server}
+    arqmq_server_{arqmq_server},
+    all_stats_{*arqmq_server}
 {
   swarm_ = std::make_unique<Swarm>(our_address_);
 
   ARQMA_LOG(info, "Requesting initial swarm state");
 
   arqmq_server->add_timer([this] { std::lock_guard l{sn_mutex_}; db_->clean_expired(); }, Database::CLEANUP_PERIOD);
-
-  arqmq_server_->add_timer([this] { std::lock_guard l{sn_mutex_}; all_stats_.cleanup(); }, STATS_CLEANUP_INTERVAL);
 
   arqmq_server_->add_timer([this] { outstanding_https_reqs_.remove_if([](auto& f) { return f.wait_for(0ms) == std::future_status::ready; }); }, 1s);
 
@@ -78,7 +73,6 @@ void ServiceNode::on_arqmad_connected()
   arqmad_ping();
   arqmq_server_->add_timer([this] { arqmad_ping(); }, ARQMAD_PING_INTERVAL);
   arqmq_server_->add_timer([this] { ping_peers(); }, reachability_testing::TESTING_TIMER_INTERVAL);
-  arqmq_server_->add_timer([this] { relay_buffered_messages(); }, RELAY_INTERVAL);
 }
 
 static block_update_t parse_swarm_update(const std::string& response_body)
@@ -189,16 +183,12 @@ void ServiceNode::bootstrap_data() {
 
     std::vector<arqmamq::address> seed_nodes;
     if (arqma::is_mainnet) {
-      seed_nodes = {{
-        "tcp://us.pool.arqma.com:19994",
-        "tcp://eu.supportarqma.com:19994",
-        "tcp://194.233.64.43:19994
-      }};
+        seed_nodes.emplace_back("tcp://us.pool.arqma.com:19994");
+        seed_nodes.emplace_back("tcp://eu.supportarqma.com:19994");
+        seed_nodes.emplace_back("tcp://194.233.64.43:19994");
     } else {
-      seed_nodes = {{
-        "tcp://161.97.102.172:39994",
-        "tcp://144.217.242.16:39994"
-      }};
+        seed_nodes.emplace_back("tcp://161.97.102.172:39994");
+        seed_nodes.emplace_back("tcp://144.217.242.16:39994");
     }
 
     auto req_counter = std::make_shared<std::atomic<int>>(0);
@@ -214,9 +204,9 @@ void ServiceNode::bootstrap_data() {
         {
           ARQMA_LOG(debug, "Failed to connect to bootstrap node {}: {}", addr, reason);
         },
-        arqmamq::connect_option::ephemeral_routing_id{true};,
+        arqmamq::connect_option::ephemeral_routing_id{true},
         arqmamq::connect_option::timeout{BOOTSTRAP_TIMEOUT}
-      };
+      );
       arqmq_server_->request(connid, "rpc.get_service_nodes",
         [this, connid, addr, req_counter, node_count=(int)seed_nodes.size()](bool success, auto data)
         {
@@ -240,7 +230,7 @@ void ServiceNode::bootstrap_data() {
             }
           }
 
-          arqmq_server_->disconned(connid);
+          arqmq_server_->disconnect(connid);
 
           if (++(*req_counter) == node_count)
           {
@@ -316,9 +306,8 @@ void ServiceNode::record_onion_request()
   all_stats_.bump_onion_requests();
 }
 
-/// do this asynchronously on a different thread? (on the same thread?)
-bool ServiceNode::process_store(const message_t& msg) {
-    std::lock_guard guard(sn_mutex_);
+bool ServiceNode::process_store(message_t msg) {
+    std::lock_guard guard{sn_mutex_};
 
     /// only accept a message if we are in a swarm
     if (!swarm_) {
@@ -329,20 +318,17 @@ bool ServiceNode::process_store(const message_t& msg) {
 
     all_stats_.bump_store_requests();
 
-    /// store in the database
-    this->save_if_new(msg);
+    if (db_->store(msg))
+      ARQMA_LOG(trace, "saved message: {}", msg.data);
 
-    this->relay_buffer_.push_back(msg);
+    std::string serialized;
+    serialize_message(serialized, Item{std::move(msg)});
 
+    for (auto& peer : swarm_->other_nodes())
+      relay_data_reliable(serialized, peer);
+
+    ARQMA_LOG(debug, "Relayed message to {} swarm peers", swarm_->other_nodes().size());
     return true;
-}
-
-void ServiceNode::save_if_new(const message_t& msg) {
-    std::lock_guard guard(sn_mutex_);
-
-    if (db_->store(msg.hash, msg.pub_key, msg.data, msg.ttl, msg.timestamp, msg.nonce)) {
-        ARQMA_LOG(trace, "saved message: {}", msg.data);
-    }
 }
 
 void ServiceNode::save_bulk(const std::vector<Item>& items) {
@@ -356,7 +342,7 @@ void ServiceNode::save_bulk(const std::vector<Item>& items) {
     ARQMA_LOG(trace, "saved messages count: {}", items.size());
 }
 
-void ServiceNode::on_bootstrap_update(block_update_t& bu) {
+void ServiceNode::on_bootstrap_update(block_update_t&& bu) {
     std::lock_guard guard(sn_mutex_);
 
     swarm_->apply_swarm_changes(bu.swarms);
@@ -398,7 +384,7 @@ static SnodeStatus derive_snode_status(const block_update_t& bu, const sn_record
   return SnodeStatus::UNSTAKED;
 }
 
-void ServiceNode::on_swarm_update(const block_update_t& bu)
+void ServiceNode::on_swarm_update(block_update_t&& bu)
 {
     if (this->hardfork_ != bu.hardfork)
     {
@@ -496,19 +482,6 @@ void ServiceNode::on_swarm_update(const block_update_t& bu)
     this->initiate_peer_test();
 }
 
-void ServiceNode::relay_buffered_messages()
-{
-  std::lock_guard guard(sn_mutex_);
-
-  if (relay_buffer_.empty())
-    return;
-
-  ARQMA_LOG(debug, "Relaying {} messages from buffer to {} nodes", relay_buffer_.size(), swarm_->other_nodes().size());
-
-  this->relay_messages(relay_buffer_, swarm_->other_nodes());
-  relay_buffer_.clear();
-}
-
 void ServiceNode::update_swarms()
 {
     if (updating_swarms_.exchange(true))
@@ -574,7 +547,7 @@ void ServiceNode::update_swarms()
 
           if (!bu.unchanged)
           {
-            OXEN_LOG(debug, "Blockchain updated, rebulding swarm list");
+            ARQMA_LOG(debug, "Blockchain updated, rebulding swarm list");
             on_swarm_update(std::move(bu));
           }
         }
@@ -583,8 +556,8 @@ void ServiceNode::update_swarms()
           ARQMA_LOG(err, "Exception caught on swarm update: {}", e.what());
         }
       },
-      params.dump();
-    };
+      params.dump()
+    );
 }
 
 void ServiceNode::update_last_ping(ReachType type)
@@ -697,7 +670,7 @@ void ServiceNode::test_reachability(const sn_record_t& sn, int previous_failures
           if (auto r = result.exchange(success ? TEST_PASSED : TEST_FAILED); r != TEST_WAITING)
             report_reachability(sn, success && r == TEST_PASSED, previous_failures);
         },
-        std::move(url);
+        std::move(url),
         cpr::Timeout{SN_PING_TIMEOUT},
         cpr::Ssl(cpr::ssl::TLSv1_2{},
                  cpr::ssl::VerifyHost{false},
@@ -731,8 +704,8 @@ void ServiceNode::arqmad_ping() {
 
     json arqmad_params{
       {"version", STORAGE_SERVER_VERSION},
-      {"https_port", our_address_.port()},
-      {"arqmq_port", our_address_.arqmq_port()}};
+      {"https_port", our_address_.port},
+      {"arqmq_port", our_address_.arqmq_port}};
 
     arqmq_server_.arqmad_request("admin.storage_server_ping",
       [this](bool success, std::vector<std::string> data) {
@@ -763,7 +736,7 @@ void ServiceNode::arqmad_ping() {
           }
       },
       arqmad_params.dump()
-    };
+    );
 
     arqmq_server_.arqmad_request("sub.block", [](bool success, auto&& result) {
       if (!success || result.empty())
@@ -807,7 +780,6 @@ void ServiceNode::process_storage_test_response(const sn_record_t& testee, const
     ARQMA_LOG(debug, "Storage test failed for some other reason: {}", status);
   }
 
-  std::lock_guard guard{sn_mutex_};
   all_stats_.record_storage_test_result(testee.pubkey_legacy, result);
 }
 
@@ -817,7 +789,7 @@ void ServiceNode::send_storage_test_req(const sn_record_t& testee,
 {
   if (!hf_at_least(FUTURE_HF_IMPL))
   {
-    cpr::Body body{json{{"height", test_height}, {"hash", item.hash}}.dumo()};
+    cpr::Body body{json{{"height", test_height}, {"hash", item.hash}}.dump()};
     cpr::Header headers{{"Host", testee.pubkey_ed25519 ? arqmamq::to_base32z(testee.pubkey_ed25519.view()) + ".snode" : "service-node.snode"}};
 
     for (auto& [h, v] : sign_request(body.str()))
@@ -864,8 +836,8 @@ void ServiceNode::send_storage_test_req(const sn_record_t& testee,
         cpr::MaxRedirects{0},
         std::move(headers),
         std::move(body)
-      }
-    };
+      )
+    );
     return;
   }
 
@@ -955,7 +927,7 @@ bool ServiceNode::derive_tester_testee(uint64_t blk_height, sn_record_t& tester,
         ARQMA_LOG(trace, "got storage test request for an older block: {}/{}",
                   blk_height, block_height_);
 
-        if (auto it = block_hashes_cache_.find(blk_keight); it != block_hashes_cache_.end())
+        if (auto it = block_hashes_cache_.find(blk_height); it != block_hashes_cache_.end())
         {
             block_hash = it->second;
         } else {
@@ -1033,36 +1005,7 @@ std::pair<MessageTestStatus, std::string> ServiceNode::process_storage_test_req(
         return {MessageTestStatus::RETRY, ""};
     }
 
-    answer = item.data;
     return {MessageTestStatus::SUCCESS, std::move(item.data)};
-}
-
-std::optional<Item> ServiceNode::select_random_message() {
-
-    uint64_t message_count;
-    if (!db_->get_message_count(message_count)) {
-        ARQMA_LOG(err, "Could not count messages in the database");
-        return {};
-    }
-
-    ARQMA_LOG(debug, "total messages: {}", message_count);
-
-    if (message_count == 0) {
-        ARQMA_LOG(debug, "No messages in the database to initiate a peer test");
-        return {};
-    }
-
-    // SNodes don't have to agree on this, rather they should use different
-    // messages
-    const auto msg_idx = util::uniform_distribution_portable(message_count);
-
-    auto item = std::make_optional<Item>();
-    if (!db_->retrieve_by_index(msg_idx, *item)) {
-        ARQMA_LOG(err, "Could not retrieve message by index: {}", msg_idx);
-        return {};
-    }
-
-    return item;
 }
 
 void ServiceNode::initiate_peer_test() {
@@ -1094,10 +1037,10 @@ void ServiceNode::initiate_peer_test() {
     }
 
     /// 2. Storage Testing
-    if (auto item = select_random_message())
+    if (Item item; db_->retrieve_random(item))
     {
-      ARQMA_LOG(trace, "Selected random message: {}, {}", item->hash, item->data);
-      send_storage_test_req(testee, test_height, *item);
+      ARQMA_LOG(trace, "Selected random message: {}, {}", item.hash, item.data);
+      send_storage_test_req(testee, test_height, item);
     }
     else
     {
@@ -1105,12 +1048,15 @@ void ServiceNode::initiate_peer_test() {
     }
 }
 
-void ServiceNode::bootstrap_peers(const std::vector<sn_record_t>& peers) const {
-
-    std::vector<Item> all_entries;
-    this->get_all_messages(all_entries);
-
-    this->relay_messages(all_entries, peers);
+void ServiceNode::bootstrap_peers(const std::vector<sn_record_t>& peers) const
+{
+  std::vector<Item> all_entries;
+  if (!get_all_messages(all_entries))
+  {
+    ARQMA_LOG(err, "Could not retrieve entries from the database");
+    return;
+  }
+  relay_messages(all_entries, peers);
 }
 
 void ServiceNode::bootstrap_swarms(
@@ -1148,13 +1094,12 @@ void ServiceNode::bootstrap_swarms(
 
         swarm_id_t swarm_id;
         const auto it = cache.find(entry.pub_key);
-        if (it == cache.end()) {
-            bool success;
-            auto pk = user_pubkey_t::create(entry.pub_key, success);
-
-            if (!success) {
-                ARQMA_LOG(err, "Invalid pubkey in a message while "
-                                 "bootstrapping other nodes");
+        if (it == cache.end())
+        {
+            user_pubkey_t pk;
+            if (!pk.load(entry.pub_key))
+            {
+                ARQMA_LOG(err, "Invalid pubkey in a message while bootstrapping other nodes");
                 continue;
             }
 
@@ -1188,8 +1133,7 @@ void ServiceNode::bootstrap_swarms(
     }
 }
 
-template <typename Message>
-void ServiceNode::relay_messages(const std::vector<Message>& messages,
+void ServiceNode::relay_messages(const std::vector<storage::Item>& messages,
                                  const std::vector<sn_record_t>& snodes) const {
     std::vector<std::string> batches = serialize_messages(messages);
 
@@ -1221,87 +1165,74 @@ void ServiceNode::salvage_data() const {
 bool ServiceNode::retrieve(const std::string& pubKey,
                            const std::string& last_hash,
                            std::vector<Item>& items) {
-    std::lock_guard guard(sn_mutex_);
+    all_stats_.bump_retrieve_requests();
 
-    all_stats_.bump_retrieve_request();
+    std::lock_guard guard{sn_mutex_};
 
     return db_->retrieve(pubKey, items, last_hash,
                          CLIENT_RETRIEVE_MESSAGE_LIMIT);
 }
 
 void to_json(nlohmann::json& j, const test_result_t& val) {
-    j["timestamp"] = val.timestamp;
+    j["timestamp"] = std::chrono::duration<double>(val.timestamp.time_since_epoch()).count();
     j["result"] = to_str(val.result);
 }
 
-static nlohmann::json to_json(const all_stats_t& stats) {
+static nlohmann::json to_json(const all_stats_t& stats)
+{
+  json peers;
+  for (const auto& [pk, stats] : stats.peer_report())
+  {
+    auto& p = peers[pk.hex()];
+    p["requests_failed"] = stats.requests_failed;
+    p["pushes_failed"] = stats.requests_failed;
+    p["storage_tests"] = stats.storage_tests;
+  }
 
-    nlohmann::json json;
-
-    json["total_store_requests"] = stats.get_total_store_requests();
-    json["recent_store_requests"] = stats.get_recent_store_requests();
-    json["previous_period_store_requests"] = stats.get_previous_period_store_requests();
-
-    json["total_retrieve_requests"] = stats.get_total_retrieve_requests();
-    json["recent_store_requests"] = stats.get_recent_store_requests();
-    json["previous_period_retrieve_requests"] = stats.get_previous_period_retrieve_requests();
-    json["previous_period_onion_requests"] = stats.get_previous_period_onion_requests();
-
-    json["reset_time"] = std::chrono::duration_cast<std::chrono::seconds>(stats.get_reset_time().time_since_epoch()).count();
-
-    nlohmann::json peers;
-
-    for (const auto& [pk, stats] : stats.peer_report_) {
-        auto pubkey = pk.hex();
-
-        peers[pubkey]["requests_failed"] = stats.requests_failed;
-        peers[pubkey]["pushes_failed"] = stats.requests_failed;
-        peers[pubkey]["storage_tests"] = stats.storage_tests;
-    }
-
-    json["peers"] = peers;
-    return json;
+  auto [window, recent] = stats.get_recent_requests();
+  return json{
+    {"total_store_requests", stats.get_total_store_requests()},
+    {"total_retrieve_requests", stats.get_total_retrieve_requests()},
+    {"total_onion_requests", stats.get_total_onion_requests()},
+    {"total_proxy_requests", stats.get_total_proxy_requests()},
+    {"recent_timespan", std::chrono::duration<double>(window).count()},
+    {"recent_store_requests", recent.client_store_requests},
+    {"recent_retrieve_requests", recent.client_retrieve_requests},
+    {"recent_onion_requests", recent.onion_requests},
+    {"recent_proxy_requests", recent.proxy_requests},
+    {"peers", std::move(peers)}
+  };
 }
 
 std::string ServiceNode::get_stats_for_session_client() const
 {
-  nlohmann::json res;
-  res["version"] = STORAGE_SERVER_VERSION_STRING;
-
-  constexpr bool PRETTY = true;
-  constexpr int indent = PRETTY ? 4 : 0;
-  return res.dump(indent);
+  return json{{"version", STORAGE_SERVER_VERSION_STRING}}.dump();
 }
 
-std::string ServiceNode::get_stats() const {
+std::string ServiceNode::get_stats() const
+{
+  auto val = to_json(all_stats_);
 
-    std::lock_guard guard(sn_mutex_);
+  val["version"] = STORAGE_SERVER_VERSION_STRING;
+  val["height"] = block_height_;
+  val["target_height"] = target_height_;
 
-    auto val = to_json(all_stats_);
+  if (uint64_t total_stored; db_->get_message_count(total_stored))
+    val["total_stored"] = total_stored;
+  if (uint64_t db_pages; db_->get_used_pages(db_pages))
+  {
+    val["db_used"] = db_pages * Database::PAGE_SIZE;
+    val["db_max"] = Database::SIZE_LIMIT;
+  }
 
-    val["version"] = STORAGE_SERVER_VERSION_STRING;
-    val["height"] = block_height_;
-    val["target_height"] = target_height_;
-
-    uint64_t total_stored;
-    if (db_->get_message_count(total_stored)) {
-        val["total_stored"] = total_stored;
-    }
-
-    val["connections_in"] = -1;
-    val["http_connections_out"] = -1;
-    val["https_connections_out"] = -1;
-
-    /// we want pretty (indented) json, but might change that in the future
-    constexpr bool PRETTY = true;
-    constexpr int indent = PRETTY ? 4 : 0;
-    return val.dump(indent);
+  return val.dump();
 }
 
 std::string ServiceNode::get_status_line() const
 {
   std::lock_guard guard(sn_mutex_);
 
+  // v2.3.4; sw=abcd…789(n=7); 123 msgs; reqs(S/R/O/P): 123/456/789/1011 in 62.3min
   std::ostringstream s;
   s << 'v' << STORAGE_SERVER_VERSION_STRING;
   if (!arqma::is_mainnet) s << " (STAGENET)";
@@ -1313,18 +1244,37 @@ std::string ServiceNode::get_status_line() const
     s << "NONE";
   else
   {
-    std::string swarm = std::to_string(swarm_->our_swarm_id());
-    if (swarm.size() <= 6)
-      s << swarm;
-    else
-      s << swarm.substr(0, 4) << u8"…" << swarm.back();
+    std::string swarm = fmt::format("{:016x}", swarm_->our_swarm_id());
+    s << swarm.substr(0, 4) << u8"…" << swarm.substr(swarm.size()-3);
     s << "(n=" << (1 + swarm_->other_nodes().size()) << ")";
   }
-  uint64_t total_stored;
-  if (db_->get_message_count(total_stored))
-    s << "; " << total_stored << " msgs";
-  s << "; reqs(S/R): " << all_stats_.get_total_store_requests() << '/' << all_stats_.get_total_retrieve_requests();
-  /*s << "; conns(in/http/https): " << get_net_stats().connections_in << '/' << get_net_stats().http_connections_out << '/' << get_net_stats().https_connections_out;*/
+  if (uint64_t msgs_stored; db_->get_message_count(msgs_stored))
+  {
+    s << "; " << msgs_stored << " msgs";
+    if (uint64_t bytes_stored; db_->get_used_pages(bytes_stored))
+    {
+      bytes_stored *= Database::PAGE_SIZE;
+      s << " (";
+      auto oldprec = s.precision(4);
+      if (bytes_stored >= 1'000'000'000)
+        s << bytes_stored * 1e-9 << 'G';
+      else if (bytes_stored >= 1'000'000)
+        s << bytes_stored * 1e-6 << 'M';
+      else if (bytes_stored >= 1000)
+        s << bytes_stored * 1e-3 << 'k';
+      else
+        s << bytes_stored;
+      s.precision(oldprec);
+      s << "B)";
+    }
+  }
+
+  auto [window, stats] = all_stats_.get_recent_requests();
+  s << "; reqs(S/R/O/P): " << stats.client_store_requests << '/'
+    << stats.client_retrieve_requests << '/'
+    << stats.onion_requests << '/'
+    << stats.proxy_requests
+    << " in " << util::short_duration(window);
   return s.str();
 }
 
@@ -1344,26 +1294,13 @@ void ServiceNode::process_push_batch(const std::string& blob)
     if (blob.empty())
         return;
 
-    std::vector<message_t> messages = deserialize_messages(blob);
+    std::vector<storage::Item> items = deserialize_messages(blob);
 
     ARQMA_LOG(trace, "Saving all: begin");
 
-    ARQMA_LOG(debug, "Got {} messages from peers, size: {}", messages.size(),
-              blob.size());
+    ARQMA_LOG(debug, "Got {} messages from peers, size: {}", items.size(), blob.size());
 
-    std::vector<Item> items;
-    items.reserve(messages.size());
-
-    // TODO: avoid copying m.data
-    // Promoting message_t to Item:
-    std::transform(messages.begin(), messages.end(), std::back_inserter(items),
-                   [](const message_t& m) {
-                       return Item{m.hash, m.pub_key,           m.timestamp,
-                                   m.ttl,  m.timestamp + m.ttl, m.nonce,
-                                   m.data};
-                   });
-
-    this->save_bulk(items);
+    save_bulk(items);
 
     ARQMA_LOG(trace, "Saving all: end");
 }

@@ -7,6 +7,7 @@
 #include "string_utils.hpp"
 
 #include <boost/endian/conversion.hpp>
+#include <chrono>
 
 namespace arqma {
 
@@ -24,52 +25,35 @@ static void serialize(std::string& buf, const std::string& str)
     buf += str;
 }
 
-template <typename T>
-void serialize_message(std::string& res, const T& msg) {
+void serialize_message(std::string& res, const storage::Item& msg) {
 
     /// TODO: use binary / base64 representation for pk
     res += msg.pub_key;
     serialize(res, msg.hash);
     serialize(res, msg.data);
-    serialize_integer(res, msg.ttl);
-    serialize_integer(res, msg.timestamp);
-    serialize(res, msg.nonce);
+    serialize_integer<uint64_t>(res, std::chrono::duration_cast<std::chrono::milliseconds>(msg.expiration - msg.timestamp).count());
+    serialize_integer<uint64_t>(res, std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()).count());
+    serialize(res, ""s);
 
     ARQMA_LOG(trace, "serialized message: {}", msg.data);
 }
 
-template void serialize_message(std::string& res, const message_t& msg);
-template void serialize_message(std::string& res, const Item& msg);
-
-template <typename T>
-std::vector<std::string> serialize_messages(const std::vector<T>& msgs) {
+std::vector<std::string> serialize_messages(const std::vector<storage::Item>& msgs) {
 
     std::vector<std::string> res;
+    res.emplace_back();
 
-    std::string buf;
+    constexpr size_t BATCH_SIZE = 9'000'000;
 
-    constexpr size_t BATCH_SIZE = 500000;
-
-    for (const auto& msg : msgs) {
-        serialize_message(buf, msg);
-        if (buf.size() > BATCH_SIZE) {
-            res.push_back(std::move(buf));
-            buf.clear();
-        }
-    }
-
-    if (!buf.empty()) {
-        res.push_back(std::move(buf));
+    for (const auto& msg : msgs)
+    {
+      if (res.back().size() > BATCH_SIZE)
+        res.emplace_back();
+      serialize_message(res.back(), msg);
     }
 
     return res;
 }
-
-template std::vector<std::string>
-serialize_messages(const std::vector<message_t>& msgs);
-
-template std::vector<std::string>
-serialize_messages(const std::vector<Item>& msgs);
 
 template <typename T>
 static std::optional<T> deserialize_integer(std::string_view& slice)
@@ -101,58 +85,62 @@ static std::optional<std::string> deserialize_string(std::string_view& slice)
   return std::nullopt;
 }
 
-std::vector<message_t> deserialize_messages(std::string_view slice) {
+std::vector<storage::Item> deserialize_messages(std::string_view slice) {
 
     ARQMA_LOG(trace, "=== Deserializing ===");
 
-    std::vector<message_t> result;
+    std::vector<storage::Item> result;
 
     while (!slice.empty()) {
+        auto& item = result.emplace_back();
 
         /// Deserialize PK
-        auto pk = deserialize_string(slice, arqma::get_user_pubkey_size());
-        if (!pk) {
+        if (auto pk = deserialize_string(slice, arqma::get_user_pubkey_size()))
+            item.pub_key = std::move(*pk);
+        else {
             ARQMA_LOG(debug, "Could not deserialize pk");
             return {};
         }
 
         /// Deserialize Hash
-        auto hash = deserialize_string(slice);
-        if (!hash) {
+        if (auto hash = deserialize_string(slice))
+            item.hash = std::move(*hash);
+        else {
             ARQMA_LOG(debug, "Could not deserialize hash");
             return {};
         }
 
         /// Deserialize Data
-        auto data = deserialize_string(slice);
-        if (!data) {
+        if (auto data = deserialize_string(slice))
+            item.data = std::move(*data);
+        else {
             ARQMA_LOG(debug, "Could not deserialize data");
             return {};
         }
 
         /// Deserialize TTL
-        auto ttl = deserialize_integer<uint64_t>(slice);
-        if (!ttl) {
+        std::chrono::milliseconds ttl;
+        if (auto ttl_ms = deserialize_integer<uint64_t>(slice))
+            ttl = std::chrono::milliseconds{*ttl_ms};
+        else {
             ARQMA_LOG(debug, "Could not deserialize ttl");
             return {};
         }
 
         /// Deserialize Timestamp
-        auto timestamp = deserialize_integer<uint64_t>(slice);
-        if (!timestamp) {
+        if (auto timestamp = deserialize_integer<uint64_t>(slice))
+            item.timestamp = std::chrono::system_clock::time_point{std::chrono::milliseconds{*timestamp}};
+        else {
             ARQMA_LOG(debug, "Could not deserialize timestamp");
             return {};
         }
 
+        item.expiration = item.timestamp + ttl;
+
         /// Deserialize Nonce
         [[maybe_unused]] auto unused_nonce = deserialize_string(slice);
 
-
-        ARQMA_LOG(trace, "Deserialized data: {}", *data);
-
-        ARQMA_LOG(trace, "pk: {}, msg: {}", *pk, *data);
-
-        result.emplace_back(std::move(*pk), std::move(*data), std::move(*hash), *ttl, *timestamp);
+        ARQMA_LOG(trace, "pk: {}, msg: {}", item.pub_key, item.data);
     }
 
     ARQMA_LOG(trace, "=== END ===");
