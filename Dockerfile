@@ -17,11 +17,11 @@ RUN set -ex \
     && make install
     
 ## Boost
-ARG BOOST_VERSION=1_70_0
-ARG BOOST_VERSION_DOT=1.70.0
-ARG BOOST_HASH=430ae8354789de4fd19ee52f3b1f739e1fba576f0aded0897c3c2bc00fb38778
+ARG BOOST_VERSION=1_73_0
+ARG BOOST_VERSION_DOT=1_73_0
+ARG BOOST_HASH=4eb3b8d442b426dc35346235c8733b5ae35ba431690e38c6a8263dce9fcbb402
 RUN set -ex \
-    && curl -s -L -o  boost_${BOOST_VERSION}.tar.bz2 https://dl.bintray.com/boostorg/release/${BOOST_VERSION_DOT}/source/boost_${BOOST_VERSION}.tar.bz2 \
+    && curl -s -L -o  boost_${BOOST_VERSION}.tar.bz2 =https://downloads.sourceforge.net/project/boost/boost/1.73.0/ \
     && echo "${BOOST_HASH}  boost_${BOOST_VERSION}.tar.bz2" | sha256sum -c \
     && tar -xvf boost_${BOOST_VERSION}.tar.bz2 \
     && cd boost_${BOOST_VERSION} \
