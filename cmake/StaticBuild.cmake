@@ -239,7 +239,7 @@ foreach(lib ${boost_libs})
 endforeach()
 
 build_external(boost
-  #  PATCH_COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/user-config.bjam tools/build/src/user-config.jam
+  #  PATCH_COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/user-config.bjam tools/build/src/user-config.jam x
   CONFIGURE_COMMAND
     ./tools/build/src/engine/build.sh ${boost_toolset} ${boost_bootstrap_cxx}
   BUILD_COMMAND
