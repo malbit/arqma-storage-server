@@ -6,7 +6,7 @@ set(OPENSSL_SOURCE openssl-${OPENSSL_VERSION}.tar.gz)
 set(OPENSSL_HASH SHA256=892a0875b9872acd04a9fde79b1f943075d5ea162415de3047c327df33fbaee5 CACHE STRING "openssl source hash")
 
 set(BOOST_VERSION 1.76.0 CACHE STRING "boost version")
-set(BOOST_MIRROR ${LOCAL_MIRROR} https://archives.boost.io/release/$($(package)_version)/source CACHE STRING "boost download mirror(s)")
+set(BOOST_MIRROR ${LOCAL_MIRROR} https://archives.boost.io/release/${BOOST_VERSION}/source CACHE STRING "boost download mirror(s)")
 string(REPLACE "." "_" BOOST_VERSION_ ${BOOST_VERSION})
 set(BOOST_SOURCE boost_${BOOST_VERSION_}.tar.bz2)
 set(BOOST_HASH SHA256=f0397ba6e982c4450f27bf32a2a83292aba035b827a5623a14636ea583318c41 CACHE STRING "boost source hash")
