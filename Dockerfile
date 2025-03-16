@@ -21,7 +21,7 @@ ARG BOOST_VERSION=1_76_0
 ARG BOOST_VERSION_DOT=1_76_0
 ARG BOOST_HASH=f0397ba6e982c4450f27bf32a2a83292aba035b827a5623a14636ea583318c41
 RUN set -ex \
-    && curl -s -L -o  boost_${BOOST_VERSION}.tar.bz2 =https://archives.boost.io/release/$($(package)_version)/source/ \
+    && curl -s -L -o  boost_${BOOST_VERSION}.tar.bz2 =https://archives.boost.io/release/${BOOST_VERSION}/source/ \
     && echo "${BOOST_HASH}  boost_${BOOST_VERSION}.tar.bz2" | sha256sum -c \
     && tar -xvf boost_${BOOST_VERSION}.tar.bz2 \
     && cd boost_${BOOST_VERSION} \
