@@ -35,7 +35,7 @@ set(ZLIB_VERSION 1.3.1 CACHE STRING "zlib version")
 set(ZLIB_MIRROR ${LOCAL_MIRROR} https://zlib.net CACHE STRING "zlib mirror(s)")
 set(ZLIB_SOURCE zlib-${ZLIB_VERSION}.tar.gz)
 set(ZLIB_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23 CACHE STRING "zlib source hash")
- 
+
 set(CURL_VERSION 7.76.1 CACHE STRING "curl version")
 set(CURL_MIRROR ${LOCAL_MIRROR} https://curl.haxx.se/download https://curl.askapache.com CACHE STRING "curl mirror(s)")
 set(CURL_SOURCE curl-${CURL_VERSION}.tar.xz)
@@ -239,7 +239,7 @@ foreach(lib ${boost_libs})
 endforeach()
 
 build_external(boost
-  #  PATCH_COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/user-config.bjam tools/build/src/user-config.jam x
+  #  PATCH_COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/user-config.bjam tools/build/src/user-config.jam
   CONFIGURE_COMMAND
     ./tools/build/src/engine/build.sh ${boost_toolset} ${boost_bootstrap_cxx}
   BUILD_COMMAND
@@ -300,7 +300,7 @@ endif()
 set_target_properties(libzmq PROPERTIES
     INTERFACE_LINK_LIBRARIES "${libzmq_link_libs}"
     INTERFACE_COMPILE_DEFINITIONS "ZMQ_STATIC")
-    
+
 set(curl_extra)
 if(WIN32)
   set(curl_ssl_opts --without-ssl --with-schannel)
@@ -310,7 +310,7 @@ else()
   set(curl_ssl_opts --with-ssl=${DEPS_DESTDIR})
   set(curl_extra "LIBS=-pthread")
 endif()
- 
+
 build_external(curl
    DEPENDS openssl_external zlib_external
    CONFIGURE_COMMAND ./configure ${cross_host} ${cross_extra} --prefix=${DEPS_DESTDIR} --disable-shared
@@ -330,7 +330,7 @@ build_external(curl
      ${DEPS_DESTDIR}/lib/libcurl.a
      ${DEPS_DESTDIR}/include/curl/curl.h
 )
- 
+
 add_static_target(CURL::libcurl curl_external libcurl.a)
 set(libcurl_link_libs zlib)
 if(CMAKE_CROSSCOMPILING AND ARCH_TRIPLET MATCHES mingw)
@@ -340,4 +340,4 @@ elseif(APPLE)
 endif()
 set_target_properties(CURL::libcurl PROPERTIES
    INTERFACE_LINK_LIBRARIES "${libcurl_link_libs}"
-   INTERFACE_COMPILE_DEFINITIONS "CURL_STATICLIB") 
+   INTERFACE_COMPILE_DEFINITIONS "CURL_STATICLIB")
