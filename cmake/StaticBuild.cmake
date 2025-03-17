@@ -8,8 +8,7 @@ set(OPENSSL_HASH SHA256=892a0875b9872acd04a9fde79b1f943075d5ea162415de3047c327df
 set(BOOST_VERSION 1.76.0 CACHE STRING "boost version")
 string(REPLACE "." "_" BOOST_VERSION_ ${BOOST_VERSION})
 
-# ✅ Poprawiony link (bez dodatkowego "boost_1_76_0.tar.bz2" po "/download")
-set(BOOST_MIRROR "https://sourceforge.net/projects/boost/files/boost/${BOOST_VERSION}/boost_${BOOST_VERSION_}.tar.bz2/download"
+set(BOOST_MIRROR "https://sourceforge.net/projects/boost/files/boost/1.76.0/boost_1_76_0.tar.bz2
                  CACHE STRING "boost download mirror")
 
 set(BOOST_SOURCE "boost_${BOOST_VERSION_}.tar.bz2")
