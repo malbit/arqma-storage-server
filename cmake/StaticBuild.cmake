@@ -7,11 +7,19 @@ set(OPENSSL_HASH SHA256=892a0875b9872acd04a9fde79b1f943075d5ea162415de3047c327df
 
 set(BOOST_VERSION 1.76.0 CACHE STRING "boost version")
 string(REPLACE "." "_" BOOST_VERSION_ ${BOOST_VERSION})
-# Poprawiony link do SourceForge
+
+# ✅ Poprawiony link (bez dodatkowego "boost_1_76_0.tar.bz2" po "/download")
 set(BOOST_MIRROR "https://sourceforge.net/projects/boost/files/boost/${BOOST_VERSION}/boost_${BOOST_VERSION_}.tar.bz2/download"
-                 CACHE STRING "boost download mirror(s)")
-set(BOOST_SOURCE boost_${BOOST_VERSION_}.tar.bz2)
-set(BOOST_HASH SHA256=f0397ba6e982c4450f27bf32a2a83292aba035b827a5623a14636ea583318c41 CACHE STRING "boost source hash")
+                 CACHE STRING "boost download mirror")
+
+set(BOOST_SOURCE "boost_${BOOST_VERSION_}.tar.bz2")
+set(BOOST_HASH "SHA256=f0397ba6e982c4450f27bf32a2a83292aba035b827a5623a14636ea583318c41" CACHE STRING "boost source hash")
+
+# Debugging - wypisanie ustawionych wartości
+message(STATUS "Downloading Boost from: ${BOOST_MIRROR}")
+message(STATUS "Expected hash: ${BOOST_HASH}")
+
+
 # Debugging - wypisanie ustawionych wartości
 message(STATUS "Downloading Boost from: ${BOOST_MIRROR}")
 message(STATUS "Expected hash: ${BOOST_HASH}")
