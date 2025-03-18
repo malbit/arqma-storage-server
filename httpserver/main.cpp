@@ -13,6 +13,9 @@
 #include <boost/filesystem.hpp>
 #include <sodium.h>
 
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+
 #include <cstdlib>
 #include <iostream>
 #include <vector>

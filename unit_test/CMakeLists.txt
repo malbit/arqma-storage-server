@@ -9,26 +9,17 @@ add_executable (Test
     command_line.cpp
 )
 
-# library under test
-
-arqma_add_subdirectory(../common common)
-arqma_add_subdirectory(../storage storage)
-arqma_add_subdirectory(../utils utils)
-arqma_add_subdirectory(../crypto crypto)
-arqma_add_subdirectory(../httpserver httpserver)
-
 target_link_libraries(Test PRIVATE common storage utils crypto httpserver_lib)
+target_include_directories(Test PRIVATE ../httpserver)
 
-# boost
-find_package(Boost REQUIRED
+if(NOT BUILD_STATIC_DEPS)
+  find_package(Boost REQUIRED
     system
     filesystem
     chrono
     thread
     unit_test_framework
-)
+  )
+endif()
 
-set_property(TARGET Test PROPERTY CXX_STANDARD 17)
-
-target_include_directories(Test PRIVATE ${Boost_INCLUDE_DIRS})
-target_link_libraries(Test PRIVATE ${Boost_LIBRARIES})
+target_link_libraries(Test PRIVATE Boost::unit_test_framework Boost::system Boost::filesystem Boost::chrono Boost::thread)

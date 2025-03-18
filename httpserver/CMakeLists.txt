@@ -1,8 +1,5 @@
-cmake_minimum_required(VERSION 3.10)
-
 add_definitions(-DDISABLE_ENCRYPTION)
-
-project(httpserver)
+add_definitions(-DSPDLOG_COMPILED_LIB)
 
 set(HEADER_FILES
     http_connection.h
@@ -38,37 +35,18 @@ set(SRC_FILES
 
 add_library(httpserver_lib STATIC ${HEADER_FILES} ${SRC_FILES})
 
-arqma_add_subdirectory(../common common)
-arqma_add_subdirectory(../storage storage)
-arqma_add_subdirectory(../utils utils)
-arqma_add_subdirectory(../crypto crypto)
-find_package(OpenSSL REQUIRED)
-
-find_package(Boost
-    REQUIRED
-    thread
-    system
-    filesystem
-    program_options
-)
-
 target_link_libraries(httpserver_lib PUBLIC common)
 target_link_libraries(httpserver_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(httpserver_lib PUBLIC storage)
 target_link_libraries(httpserver_lib PUBLIC utils)
 target_link_libraries(httpserver_lib PUBLIC resolv)
-target_link_libraries(httpserver_lib PUBLIC crypto)
-
-set_property(TARGET httpserver_lib PROPERTY CXX_STANDARD 17)
-
-target_include_directories(httpserver_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${Boost_INCLUDE_DIRS})
-target_link_libraries(httpserver_lib PUBLIC ${Boost_LIBRARIES})
+target_link_libraries(httpserver_lib PUBLIC crypto spdlog::spdlog)
+target_link_libraries(httpserver_lib PUBLIC Boost::boost Boost::program_options)
 
 set(BIN_NAME arqma-storage)
 
 add_executable(httpserver main.cpp)
 set_target_properties(httpserver PROPERTIES OUTPUT_NAME ${BIN_NAME})
-set_property(TARGET httpserver PROPERTY CXX_STANDARD 17)
 target_link_libraries(httpserver PRIVATE httpserver_lib)
 install(TARGETS httpserver DESTINATION bin)
 # Build Info
