@@ -6,10 +6,6 @@ add_library(crypto STATIC
 
 target_include_directories(crypto PUBLIC include)
 
-
-add_executable(crypto_test src/test_main.cpp)
-target_link_libraries(crypto_test PRIVATE crypto)
-
 find_package(Threads)
 
 target_link_libraries(crypto
@@ -19,6 +15,7 @@ target_link_libraries(crypto
   PRIVATE
     arqma-crypto-ops
     OpenSSL::SSL
+    OpenSSL::Crypto
     sodium
     Boost::boost
     Threads::Threads

@@ -41,11 +41,12 @@ target_link_libraries(httpserver_lib PUBLIC storage)
 target_link_libraries(httpserver_lib PUBLIC utils)
 target_link_libraries(httpserver_lib PUBLIC resolv)
 target_link_libraries(httpserver_lib PUBLIC crypto spdlog::spdlog)
-target_link_libraries(httpserver_lib PUBLIC Boost::boost Boost::program_options)
+target_link_libraries(httpserver_lib PUBLIC Boost::boost Boost::program_options Boost::filesystem)
 
 set(BIN_NAME arqma-storage)
 
 add_executable(httpserver main.cpp)
+set_property(TARGET httpserver PROPERTY RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/binaries")
 set_target_properties(httpserver PROPERTIES OUTPUT_NAME ${BIN_NAME})
 target_link_libraries(httpserver PRIVATE httpserver_lib)
 install(TARGETS httpserver DESTINATION bin)
