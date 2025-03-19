@@ -34,6 +34,8 @@ struct block_update_t {
 swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms,
                            const user_pubkey_t& pk);
 
+auto apply_ips(const all_swarms_t& swarms_to_keep, const all_swarms_t& other_swarms) -> all_swarms_t;
+
 struct SwarmEvents {
 
     /// our (potentially new) swarm id

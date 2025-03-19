@@ -725,9 +725,9 @@ void ServiceNode::arqmad_ping_timer_tick() {
     };
 
     json params;
-    params["version_major"] = VERSION_MAJOR;
-    params["version_minor"] = VERSION_MINOR;
-    params["version_patch"] = VERSION_PATCH;
+    params["version_major"] = STORAGE_SERVER_VERSION[0];
+    params["version_minor"] = STORAGE_SERVER_VERSION[1];
+    params["version_patch"] = STORAGE_SERVER_VERSION[2];
     arqmad_client_.make_arqmad_request("storage_server_ping", params,
                                        std::move(cb));
 

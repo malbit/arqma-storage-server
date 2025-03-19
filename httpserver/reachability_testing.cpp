@@ -25,7 +25,7 @@ bool reachability_records_t::record_unreachable(const sn_pub_key_t& sn) {
         ARQMA_LOG(debug, "Adding a new node to UNREACHABLE: {}", sn);
         offline_nodes_.insert({sn, {}});
     } else {
-        ARQMA_LOG(debug, "Node is ALREAY known to be UNREACHABLE: {}", sn);
+        ARQMA_LOG(debug, "Node is ALREADY known to be UNREACHABLE: {}", sn);
 
         it->second.last_tested = steady_clock::now();
 

@@ -54,6 +54,12 @@ int main(int argc, char* argv[]) {
         return EXIT_SUCCESS;
     }
 
+    if (options.print_version)
+    {
+      std::cout << STORAGE_SERVER_VERSION_INFO;
+      return EXIT_SUCCESS;
+    }
+
     if (options.data_dir.empty()) {
         if (auto home_dir = get_home_dir()) {
           if (options.stagenet) {
@@ -83,10 +89,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Always print version for the logs
-    print_version();
-    if (options.print_version) {
-        return EXIT_SUCCESS;
-    }
+    ARQMA_LOG(info, "{}", STORAGE_SERVER_VERSION_INFO);
 
     if (options.ip == "127.0.0.1") {
         ARQMA_LOG(critical,
