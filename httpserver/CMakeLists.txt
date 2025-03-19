@@ -11,6 +11,7 @@ add_library(httpserver_lib STATIC
     command_line.cpp
     dns_text_records.cpp
     reachability_testing.cpp
+    server_certificates.cpp
     )
 
 target_link_libraries(httpserver_lib
