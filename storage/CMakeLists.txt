@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.10)
-
 add_library(storage STATIC
   src/Database.cpp)
 
@@ -7,8 +5,6 @@ target_include_directories(storage
     PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/include
 )
-
-target_link_libraries(storage PRIVATE common utils)
 
 if(BUILD_STATIC_DEPS)
   # sqlite3 target already set up
@@ -22,6 +18,9 @@ else()
   target_link_libraries(sqlite3 INTERFACE ${sqlite3_link_libs})
   target_include_directories(sqlite3 INTERFACE ${SQLITE3_INCLUDE_DIRS})
 endif()
-target_link_libraries(storage PRIVATE sqlite3)
-
-target_link_libraries(storage PRIVATE Boost::boost)
+target_link_libraries(storage
+  PRIVATE
+    common
+    utils
+    sqlite3
+    Boost::boost)

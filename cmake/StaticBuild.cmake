@@ -259,7 +259,7 @@ elseif(APPLE)
   endif()
 endif()
 
-set(boost_libs program_options system filesystem thread chrono)
+set(boost_libs program_options system)
 if(BUILD_TESTS)
     list(APPEND boost_libs unit_test_framework)
 endif()

@@ -60,9 +60,11 @@ else()
   add_library(sodium INTERFACE)
   target_link_libraries(sodium INTERFACE PkgConfig::SODIUM)
 
-  find_package(Boost 1.68.0 QUIET REQUIRED COMPONENTS system program_options filesystem thread chrono)
+  find_package(Boost 1.68.0 QUIET REQUIRED COMPONENTS system program_options)
   find_package(OpenSSL REQUIRED)
 endif()
+
+include(cmake/check_for_std_filesystem.cmake)
 
 add_subdirectory(common)
 add_subdirectory(utils)

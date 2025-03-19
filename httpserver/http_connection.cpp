@@ -205,7 +205,7 @@ static void accept_connection(boost::asio::io_context& ioc, boost::asio::ssl::co
 }
 
 void run(boost::asio::io_context& ioc, const std::string& ip, uint16_t port,
-         const boost::filesystem::path& base_path, ServiceNode& sn,
+         const std::filesystem::path& base_path, ServiceNode& sn,
          ChannelEncryption<std::string>& channel_encryption,
          RateLimiter& rate_limiter, Security& security) {
 

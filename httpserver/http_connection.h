@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -11,7 +12,6 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
-#include <boost/filesystem.hpp>
 #include <boost/format.hpp>
 
 #include "swarm.h"
@@ -279,7 +279,7 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
 };
 
 void run(boost::asio::io_context& ioc, const std::string& ip, uint16_t port,
-         const boost::filesystem::path& base_path, ServiceNode& sn,
+         const std::filesystem::path& base_path, ServiceNode& sn,
          ChannelEncryption<std::string>& channelEncryption,
          RateLimiter& rate_limiter, Security&);
 

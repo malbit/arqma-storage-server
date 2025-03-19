@@ -31,6 +31,12 @@ void make_https_request(boost::asio::io_context& ioc,
         return;
     }
 
+    if (sn_address == "0.0.0.0")
+    {
+      ARQMA_LOG(error, "Could not initiate request to snode (we don't know their IP yet).");
+      return;
+    }
+
     const auto resolve_results =
         resolver.resolve(sn_address, std::to_string(port), ec);
 #endif

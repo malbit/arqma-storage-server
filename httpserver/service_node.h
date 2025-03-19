@@ -5,13 +5,13 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/circular_buffer.hpp>
 #include <boost/optional.hpp>
-#include <boost/thread/thread.hpp>
 
 #include "arqma_common.h"
 #include "arqmad_key.h"

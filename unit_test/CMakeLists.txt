@@ -14,12 +14,8 @@ target_include_directories(Test PRIVATE ../httpserver)
 
 if(NOT BUILD_STATIC_DEPS)
   find_package(Boost REQUIRED
-    system
-    filesystem
-    chrono
-    thread
     unit_test_framework
   )
 endif()
 
-target_link_libraries(Test PRIVATE Boost::unit_test_framework Boost::system Boost::filesystem Boost::chrono Boost::thread)
+target_link_libraries(Test PRIVATE Boost::unit_test_framework)
