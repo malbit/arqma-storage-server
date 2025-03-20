@@ -58,11 +58,7 @@ struct sn_record_t {
 
     template <typename OStream>
     friend OStream& operator<<(OStream& os, const sn_record_t& record) {
-#ifdef INTEGRATION_TEST
-        os << record.port();
-#else
         os << record.sn_address();
-#endif
     }
 };
 
@@ -162,11 +158,7 @@ inline bool operator<(const sn_record_t& lhs, const sn_record_t& rhs) {
 }
 
 static std::ostream& operator<<(std::ostream& os, const sn_record_t& sn) {
-#ifdef INTEGRATION_TEST
-    return os << sn.port();
-#else
     return os << sn.sn_address();
-#endif
 }
 
 static bool operator==(const sn_record_t& lhs, const sn_record_t& rhs) {

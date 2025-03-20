@@ -133,18 +133,8 @@ int main(int argc, char* argv[]) {
         arqma::private_key_t private_key;
         arqma::private_key_ed25519_t private_key_ed25519;
         arqma::private_key_t private_key_x25519;
-#ifndef INTEGRATION_TEST
         std::tie(private_key, private_key_ed25519, private_key_x25519) = arqmad_client.wait_for_privkey();
-#else
-        private_key = arqma::arqmadKeyFromHex(options.arqmad_key);
-        ARQMA_LOG(info, "ARQMAD LEGACY KEY: {}", options.arqmad_key);
 
-        private_key_x25519 = arqma::arqmadKeyFromHex(options.arqmad_x25519_key);
-        ARQMA_LOG(info, "x25519 SECRET KEY: {}", options.arqmad_x25519_key);
-
-        private_key_ed25519 = arqma::private_key_ed25519_t::from_hex(options.arqmad_ed25519_key);
-        ARQMA_LOG(info, "ed25519 SECRET KEY: {}", options.arqmad_ed25519_key);
-#endif
         const auto public_key = arqma::derive_pubkey_legacy(private_key);
         ARQMA_LOG(info, "Retrieved keys from Arqmad. Our Service-Node pubkey is: {}", util::as_hex(public_key));
 

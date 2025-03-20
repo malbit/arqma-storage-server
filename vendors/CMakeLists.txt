@@ -22,6 +22,9 @@ else()
   add_subdirectory(spdlog)
 endif()
 
+set(JSON_MultipleHeaders ON CACHE BOOL "")
+add_subdirectory(nlohmann_json)
+
 add_library(arqma-crypto-ops STATIC
   arqma/crypto-ops/keccak.c
   arqma/crypto-ops/hash-ops.c

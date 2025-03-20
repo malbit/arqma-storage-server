@@ -23,6 +23,7 @@ target_link_libraries(httpserver_lib
     spdlog::spdlog
     OpenSSL::SSL
     OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
     Boost::system
     Boost::program_options)
 

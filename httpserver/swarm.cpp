@@ -214,6 +214,17 @@ boost::optional<sn_record_t> Swarm::find_node_by_port(uint16_t port) const {
   return boost::none;
 }
 
+boost::optional<sn_record_t> Swarm::find_node_by_ed25519_pk(const std::string& pk) const
+{
+  for (const auto& sn : all_funded_nodes_)
+  {
+    if (sn.pubkey_ed25519_hex() == pk)
+      return sn;
+  }
+
+  return boost::none;
+}
+
 boost::optional<sn_record_t> Swarm::get_node_by_pk(const sn_pub_key_t& pk) const {
   for (const auto& sn : all_funded_nodes_) {
     if (sn.pub_key_base32z() == pk) {

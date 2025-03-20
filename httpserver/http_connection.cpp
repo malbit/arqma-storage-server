@@ -11,7 +11,9 @@
 #include "service_node.h"
 #include "signature.h"
 #include "utils.hpp"
+#include "https_client.h"
 
+#include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <ctime>
 #include <functional>
@@ -32,6 +34,10 @@ namespace sp = std::placeholders; // for std::placeholders:: code shorten
 /// +===========================================
 
 static constexpr auto ARQMA_EPHEMKEY_HEADER = "X-Arqma-EphemKey";
+static constexpr auto ARQMA_LONG_POLL_HEADER = "X-Arqma-Long-Poll";
+static constexpr auto ARQMA_FILE_SERVER_TARGET_HEADER = "X-Arqma-File-Server-Target";
+static constexpr auto ARQMA_FILE_SERVER_VERB_HEADER = "X-Arqma-File-Server-Verb";
+static constexpr auto ARQMA_FILE_SERVER_HEADERS_HEADER = "X-Arqma-File-Server-Headers";
 
 using arqma::storage::Item;
 
@@ -47,7 +53,18 @@ constexpr auto TEST_RETRY_PERIOD = std::chrono::milliseconds(50);
 // corresponds to the client-side limit of 2000 chars
 // of unencrypted message body in our experiments
 // (rounded up)
-constexpr size_t MAX_MESSAGE_BODY = 3100;
+constexpr size_t MAX_MESSAGE_BODY = 102400; // 100 kB
+
+std::shared_ptr<request_t> build_post_request(const char* target, std::string&& data)
+{
+  auto req = std::make_shared<request_t>();
+  req->body() = std::move(data);
+  req->method(http::verb::post);
+  req->set(http::field::host, "service node");
+  req->target(target);
+  req->prepare_payload();
+  return req;
+}
 
 void make_http_request(boost::asio::io_context& ioc,
                        const std::string& sn_address, uint16_t port,
@@ -57,13 +74,7 @@ void make_http_request(boost::asio::io_context& ioc,
     error_code ec;
     tcp::endpoint endpoint;
     tcp::resolver resolver(ioc);
-#ifdef INTEGRATION_TEST
-    tcp::resolver::iterator destination =
-        resolver.resolve("0.0.0.0", "http", ec);
-#else
-    tcp::resolver::iterator destination =
-        resolver.resolve(sn_address, "http", ec);
-#endif
+    tcp::resolver::iterator destination = resolver.resolve(sn_address, "http", ec);
     if (ec) {
         ARQMA_LOG(error,
                   "http: Failed to parse the IP address <{}>. Error code = {}. "
@@ -134,7 +145,7 @@ ArqmadClient::wait_for_privkey()
   arqma::private_key_t private_key_x;
   ARQMA_LOG(info, "Retrieving Service-Node key from Arqmad");
   boost::asio::steady_timer delay{ioc_};
-  std::function<void(arqma::sn_response_t &&res)> key_fetch;
+  std::function<void(arqma::sn_response_t && res)> key_fetch;
   key_fetch = [&](arqma::sn_response_t res) {
     try {
       if (res.error_code != arqma::SNodeError::NO_ERROR)
@@ -247,6 +258,9 @@ connection_t::connection_t(boost::asio::io_context& ioc, ssl::context& ssl_ctx,
 
     ARQMA_LOG(trace, "connection_t [{}]", conn_idx);
 
+    request_.body_limit(1024 * 1024 * 10); // 10 MB
+    std::cerr << request_.get() << std::endl;
+
     start_timestamp_ = std::chrono::steady_clock::now();
 }
 
@@ -296,9 +310,8 @@ void connection_t::clean_up()
 {
   this->do_close();
 
-  if (this->notification_ctx_) {
+  if (this->notification_ctx_)
     this->service_node_.remove_listener(this->notification_ctx_->pubkey, this);
-  }
 }
 
 void connection_t::notify(boost::optional<const message_t&> msg) {
@@ -387,10 +400,10 @@ bool connection_t::validate_snode_request() {
     return true;
 }
 
-bool connection_t::verify_signature(const std::string& signature,
-                                    const std::string& public_key_b32z) {
-    const auto body_hash = hash_data(request_.body());
-    return check_signature(signature, body_hash, public_key_b32z);
+bool connection_t::verify_signature(const std::string& signature, const std::string& public_key_b32z)
+{
+  const auto body_hash = hash_data(request_.get().body());
+  return check_signature(signature, body_hash, public_key_b32z);
 }
 
 void connection_t::process_storage_test_req(uint64_t height,
@@ -472,7 +485,117 @@ void connection_t::process_blockchain_test_req(uint64_t,
     service_node_.perform_blockchain_test(params, std::move(callback));
 }
 
+static void print_headers(const request_t& req)
+{
+  ARQMA_LOG(info, "HEADERS:");
+  for (const auto& field : req)
+    ARQMA_LOG(info, "  [{}]: {}", field.name_string(), field.value());
+}
+
+void connection_t::process_proxy_req()
+{
+  ARQMA_LOG(debug, "Processing proxy request: we are first hop");
+
+  const request_t& req = this->request_.get();
+  delay_response_ = true;
+
+  if (!parse_header(ARQMA_SENDER_KEY_HEADER, ARQMA_TARGET_SNODE_KEY))
+  {
+    ARQMA_LOG(debug, "Missing headers for a proxy request");
+    return;
+  }
+
+  const auto& sender_key = header_[ARQMA_SENDER_KEY_HEADER];
+  const auto& target_snode_key = header_[ARQMA_TARGET_SNODE_KEY];
+
+  service_node_.process_proxy_req(req.body(), sender_key, target_snode_key, [this] (sn_response_t res)
+  {
+    if (res.raw_response)
+      this->response_ = *res.raw_response;
+
+    this->write_response();
+  });
+}
+
+void connection_t::process_file_proxy_req()
+{
+  ARQMA_LOG(debug, "Processing file proxy request: we are the first hop");
+
+  const request_t& original_req = this->request_.get();
+  delay_response_ = true;
+
+  if (!parse_header(ARQMA_FILE_SERVER_TARGET_HEADER, ARQMA_FILE_SERVER_VERB_HEADER, ARQMA_FILE_SERVER_HEADERS_HEADER))
+  {
+    ARQMA_LOG(error, "Missing headers for file proxy request");
+    return;
+  }
+
+  const auto& target = header_[ARQMA_FILE_SERVER_TARGET_HEADER];
+  const auto& verb_str = header_[ARQMA_FILE_SERVER_VERB_HEADER];
+  const auto& headers_str = header_[ARQMA_FILE_SERVER_HEADERS_HEADER];
+
+  ARQMA_LOG(trace, "Target: {}", target);
+  ARQMA_LOG(trace, "Verb: {}", verb_str);
+  ARQMA_LOG(trace, "Headers json: {}", headers_str);
+
+  const json headers_json = json::parse(headers_str, nullptr, false);
+  if (headers_json.is_discarded())
+  {
+    ARQMA_LOG(debug, "Bad file proxy request: invalid header json");
+    response_.result(http::status::bad_request);
+    return;
+  }
+
+  auto req = std::make_shared<request_t>();
+
+  namespace http = boost::beast::http;
+
+  if (verb_str == "POST") req->method(http::verb::post);
+  else if (verb_str == "PATCH") req->method(http::verb::patch);
+  else if (verb_str == "PUT") req->method(http::verb::put);
+  else if (verb_str == "DELETE") req->method(http::verb::delete_);
+  else req->method(http::verb::get);
+
+  {
+    const auto it = original_req.find(http::field::content_type);
+    if (it != original_req.end())
+    {
+      ARQMA_LOG(trace, "Content-Type: {}", it->value().to_string());
+      req->set(http::field::content_type, it->value().to_string());
+    }
+  }
+
+  req->body() = std::move(original_req.body());
+  req->target(target);
+  req->set(http::field::host, "file.arqma.com");
+
+  req->prepare_payload();
+
+  for (auto& el : headers_json.items())
+    req->insert(el.key(), el.value());
+
+  auto cb = [this](sn_response_t res)
+  {
+    ARQMA_LOG(trace, "Successful file proxy request!");
+    if (res.raw_response)
+    {
+      this->response_ = *res.raw_response;
+      ARQMA_LOG(trace, "Response: {}", this->response_);
+    }
+    else
+    {
+      ARQMA_LOG(debug, "No response from file server");
+    }
+
+    this->write_response();
+  };
+
+  make_https_request(ioc_, "https://file.arqma.com", req, cb);
+}
+
 void connection_t::process_swarm_req(boost::string_view target) {
+
+    const request_t& req = this->request_.get();
 
     if (!validate_snode_request() && (target != "/swarms/ping_test/v1")) {
         return;
@@ -482,14 +605,14 @@ void connection_t::process_swarm_req(boost::string_view target) {
 
     if (target == "/swarms/push_batch/v1") {
       response_.result(http::status::ok);
-      service_node_.process_push_batch(request_.body());
+      service_node_.process_push_batch(req.body());
     } else if (target == "/swarms/storage_test/v1") {
         response_.result(http::status::bad_request);
         ARQMA_LOG(debug, "Got storage test request");
 
         using nlohmann::json;
 
-        const json body = json::parse(request_.body(), nullptr, false);
+        const json body = json::parse(req.body(), nullptr, false);
 
         if (body == nlohmann::detail::value_t::discarded) {
             ARQMA_LOG(debug, "Bad snode test request: invalid json");
@@ -524,7 +647,7 @@ void connection_t::process_swarm_req(boost::string_view target) {
 
         using nlohmann::json;
 
-        const json body = json::parse(request_.body(), nullptr, false);
+        const json body = json::parse(req.body(), nullptr, false);
 
         if (body.is_discarded()) {
             ARQMA_LOG(debug, "Bad snode test request: invalid json");
@@ -569,30 +692,85 @@ void connection_t::process_swarm_req(boost::string_view target) {
 
         /// NOTE:: we only expect one message here, but
         /// for now lets reuse the function we already have
-        std::vector<message_t> messages = deserialize_messages(request_.body());
+        std::vector<message_t> messages = deserialize_messages(req.body());
         assert(messages.size() == 1);
 
         service_node_.process_push(messages.front());
 
         response_.result(http::status::ok);
     }
+    else if (target == "/swarms/proxy_exit")
+    {
+      ARQMA_LOG(debug, "Processing proxy request: we are the destination node");
+
+      const auto it = req.find(ARQMA_SENDER_KEY_HEADER);
+      if (it != req.end())
+      {
+        const std::string key = {it->value().data(), it->value().size()};
+        const auto plaintext = this->channel_cipher_.decrypt(req.body(), key);
+        try
+        {
+          const json req = json::parse(plaintext, nullptr, true);
+          const auto body = req.at("body").get<std::string>();
+          this->response_modifier_ = [this, key](response_t& res)
+          {
+            nlohmann::json json_res;
+            json_res["status"] = res.result_int();
+            json_res["body"] = res.body();
+
+            nlohmann::json headers;
+            for (const auto& field : res)
+            {
+              std::string name = field.name_string().to_string();
+              headers[std::move(name)] = field.value();
+            }
+
+            json_res["headers"] = headers;
+            const std::string res_body = json_res.dump();
+            res.body() = util::base64_encode(this->channel_cipher_.encrypt(res_body, key));
+            res.result(http::status::ok);
+          };
+
+          ARQMA_LOG(trace, "CLIENT HEADERS: \n\t{}", req.at("headers").dump(2));
+
+          const auto headers_it = req.find("headers");
+          if (headers_it != req.end())
+          {
+            const auto long_poll_it = headers_it->find(ARQMA_LONG_POLL_HEADER);
+            if (long_poll_it != headers_it->end())
+            {
+              const bool val = long_poll_it->get<bool>();
+              ARQMA_LOG(info, "field: {}: {}", ARQMA_LONG_POLL_HEADER, val);
+              this->header_.insert({ARQMA_LONG_POLL_HEADER, val ? "true" : "false"});
+            }
+          }
+
+          this->process_client_req(body);
+
+        } catch (std::exception& e)
+        {
+          ARQMA_LOG(error, "JSON parsing error: {}", e.what());
+        }
+      }
+    }
 }
 
 // Determine what needs to be done with the request message.
 void connection_t::process_request() {
 
+    const request_t& req = this->request_.get();
     /// This method is responsible for filling out response_
 
     ARQMA_LOG(trace, "connection_t::process_request");
-    response_.version(request_.version());
+    response_.version(req.version());
     response_.keep_alive(false);
 
     /// TODO: make sure that we always send a response!
 
     response_.result(http::status::internal_server_error);
 
-    const auto target = request_.target();
-    switch (request_.method()) {
+    const auto target = req.target();
+    switch (req.method()) {
     case http::verb::post: {
         std::string reason;
 
@@ -614,7 +792,7 @@ void connection_t::process_request() {
             ARQMA_LOG(trace, "POST /storage_rpc/v1");
 
             try {
-                process_client_req();
+                process_client_req_rate_limited();
             } catch (std::exception& e) {
                 this->body_stream_ << fmt::format(
                     "Exception caught while processing client request: {}",
@@ -639,25 +817,14 @@ void connection_t::process_request() {
 
             this->process_swarm_req(target);
 
+        } else if (target == "/proxy") {
+          this->process_proxy_req();
+        } else if (target == "/file_proxy") {
+          this->process_file_proxy_req();
+        } else if (target == "/swarms/proxy_exit") {
+          this->process_swarm_req(target);
+
         }
-#ifdef INTEGRATION_TEST
-        else if (target == "/retrieve_all") {
-            process_retrieve_all();
-        } else if (target == "/quit") {
-            ARQMA_LOG(info, "POST /quit");
-            // a bit of a hack: sending response manually
-            delay_response_ = true;
-            response_.result(http::status::ok);
-            write_response();
-            ioc_.stop();
-        } else if (target == "/sleep") {
-            ioc_.post([]() {
-              ARQMA_LOG(warn, "Sleeping for some time...");
-              std::this_thread::sleep_for(std::chrono::seconds(30));
-            });
-            response_.result(http::status::ok);
-        }
-#endif
         else {
             ARQMA_LOG(debug, "unknown target for POST: {}", target.to_string());
             this->body_stream_ << fmt::format("unknown target for POST: {}",
@@ -711,7 +878,6 @@ void connection_t::write_response() {
             response_.set(http::field::content_type, "text/plain");
             body_stream_ << "Could not encrypt/encode response: ";
             body_stream_ << e.what() << "\n";
-            response_.body() = body_stream_.str();
             ARQMA_LOG(
                 critical,
                 "Internal Server Error. Could not encrypt response for {}",
@@ -719,11 +885,17 @@ void connection_t::write_response() {
         }
     }
 #else
-    response_.body() = body_stream_.str();
+    const std::string body_stream = body_stream_.str();
+    if (!body_stream.empty())
+    {
+      if (!response_.body().empty())
+        ARQMA_LOG(debug, "Overwriting non-empty body in response!");
+
+      response_.body() = body_stream_.str();
+    }
 #endif
 
-    response_.set(http::field::content_length,
-                  std::to_string(response_.body().size()));
+    response_.set(http::field::content_length, std::to_string(response_.body().size()));
 
     /// This attempts to write all data to a stream
     /// TODO: handle the case when we are trying to send too much
@@ -741,8 +913,8 @@ void connection_t::write_response() {
 }
 
 bool connection_t::parse_header(const char* key) {
-    const auto it = request_.find(key);
-    if (it == request_.end()) {
+    const auto it = request_.get().find(key);
+    if (it == request_.get().end()) {
         body_stream_ << "Missing field in header : " << key << "\n";
         return false;
     }
@@ -816,10 +988,6 @@ void connection_t::process_store(const json& params) {
         handle_wrong_swarm(pk);
         return;
     }
-
-#ifdef INTEGRATION_TEST
-    ARQMA_LOG(trace, "store body: ", data);
-#endif
 
     uint64_t ttlInt;
     if (!util::parseTTL(ttl, ttlInt)) {
@@ -952,8 +1120,7 @@ void connection_t::poll_db(const std::string& pk,
         return;
     }
 
-    const bool lp_requested =
-        request_.find("X-Arqma-Long-Poll") != request_.end();
+    const bool lp_requested = header_.find(ARQMA_LONG_POLL_HEADER) != header_.end();
 
     if (!items.empty()) {
         ARQMA_LOG(trace, "Successfully retrieved messages for {}",
@@ -1040,76 +1207,100 @@ void connection_t::process_retrieve(const json& params) {
     poll_db(pk.str(), last_hash);
 }
 
-void connection_t::process_client_req() {
-    std::string plain_text = request_.body();
-    const std::string client_ip =
-        socket_.remote_endpoint().address().to_string();
-    if (rate_limiter_.should_rate_limit_client(client_ip)) {
-        this->body_stream_ << "too many requests\n";
-        response_.result(http::status::too_many_requests);
-        ARQMA_LOG(debug, "Rate limiting client request.");
-        return;
-    }
+void connection_t::process_client_req(const std::string& req_json)
+{
+  const json body = json::parse(req_json, nullptr, false);
+  if (body == nlohmann::detail::value_t::discarded)
+  {
+    response_.result(http::status::bad_request);
+    body_stream_ << "invalid json\n";
+    ARQMA_LOG(debug, "Bad client request: invalid json");
+    return;
+  }
+
+  const auto method_it = body.find("method");
+  if (method_it == body.end() || !method_it->is_string())
+  {
+    response_.result(http::status::bad_request);
+    body_stream_ << "invalid json: no `method` field\n";
+    ARQMA_LOG(debug, "Bad client request: no method field");
+    return;
+  }
+
+  const auto method_name = method_it->get<std::string>();
+
+  const auto params_it = body.find("params");
+  if (params_it == body.end() || !params_it->is_object())
+  {
+    response_.result(http::status::bad_request);
+    body_stream_ << "invalid json: no `params` field\n";
+    ARQMA_LOG(debug, "Bad client request: no params field");
+    return;
+  }
+
+  if (method_name == "store")
+  {
+    ARQMA_LOG(trace, "Process client request: store, connection: {}", this->conn_idx);
+    this->process_store(*params_it);
+  } else if (method_name == "retrieve")
+  {
+    ARQMA_LOG(trace, "Process client request: retrieve, connection: {}", this->conn_idx);
+    this->process_retrieve(*params_it);
+  } else if (method_name == "get_snodes_for_pubkey")
+  {
+    ARQMA_LOG(trace, "Process client request: snode for pubkey");
+    this->process_snodes_by_pk(*params_it);
+  }
+  else
+  {
+    response_.result(http::status::bad_request);
+    body_stream_ << "no method" << method_name << "\n";
+    ARQMA_LOG(debug, "Bad client request: unknown method '{}'", method_name);
+  }
+}
+
+void connection_t::process_client_req_rate_limited()
+{
+  const request_t& req = this->request_.get();
+  std::string plain_text = req.body();
+  const std::string client_ip = socket_.remote_endpoint().address().to_string();
+  if (rate_limiter_.should_rate_limit_client(client_ip))
+  {
+    this->body_stream_ << "too many requests\n";
+    response_.result(http::status::too_many_requests);
+    ARQMA_LOG(debug, "Rate limiting client request.");
+    return;
+  }
 
 #ifndef DISABLE_ENCRYPTION
-    if (!parse_header(ARQMA_EPHEMKEY_HEADER)) {
-        ARQMA_LOG(debug, "Bad client request: could not parse headers");
-        return;
-    }
+  if (!parse_header(ARQMA_EPHEMKEY_HEADER))
+  {
+    ARQMA_LOG(debug, "Bad client request: could not parse headers");
+    return;
+  }
 
-    try {
-        const std::string decoded =
-            boost::beast::detail::base64_decode(plain_text);
-        plain_text =
-            channel_cipher_.decrypt(decoded, header_[ARQMA_EPHEMKEY_HEADER]);
-    } catch (const std::exception& e) {
-        response_.result(http::status::bad_request);
-        response_.set(http::field::content_type, "text/plain");
-        body_stream_ << "Could not decode/decrypt body: ";
-        body_stream_ << e.what() << "\n";
-        ARQMA_LOG(debug, "Bad client request: could not decrypt body");
-        return;
-    }
+  try
+  {
+    const std::string decoded = boost::beast::detail::base64_decode(plain_text);
+    plain_text = channel_cipher_.decrypt(decoded, header_[ARQMA_EPHEMKEY_HEADER]);
+  }
+  catch (const std::exception& e)
+  {
+    response_.result(http::status::bad_request);
+    response_.set(http::field::content_type, "text/plain");
+    body_stream_ << "Could not decode/decrypy body: ";
+    body_stream_ << e.what() << "\n";
+    ARQMA_LOG(debug, "Bad client request: could not decrypt body");
+    return;
+  }
 #endif
 
-    const json body = json::parse(plain_text, nullptr, false);
-    if (body == nlohmann::detail::value_t::discarded) {
-        response_.result(http::status::bad_request);
-        body_stream_ << "invalid json\n";
-        ARQMA_LOG(debug, "Bad client request: invalid json");
-        return;
-    }
+  if (req.find(ARQMA_LONG_POLL_HEADER) != req.end())
+  {
+    header_[ARQMA_LONG_POLL_HEADER] = req.at(ARQMA_LONG_POLL_HEADER).to_string();
+  }
 
-    const auto method_it = body.find("method");
-    if (method_it == body.end() || !method_it->is_string()) {
-        response_.result(http::status::bad_request);
-        body_stream_ << "invalid json: no `method` field\n";
-        ARQMA_LOG(debug, "Bad client request: no method field");
-        return;
-    }
-
-    const auto method_name = method_it->get<std::string>();
-
-    const auto params_it = body.find("params");
-    if (params_it == body.end() || !params_it->is_object()) {
-        response_.result(http::status::bad_request);
-        body_stream_ << "invalid json: no `params` field\n";
-        ARQMA_LOG(debug, "Bad client request: no params field");
-        return;
-    }
-
-    if (method_name == "store") {
-        process_store(*params_it);
-    } else if (method_name == "retrieve") {
-        process_retrieve(*params_it);
-    } else if (method_name == "get_snodes_for_pubkey") {
-        process_snodes_by_pk(*params_it);
-    } else {
-        response_.result(http::status::bad_request);
-        body_stream_ << "no method" << method_name << "\n";
-        ARQMA_LOG(debug, "Bad client request: unknown method '{}'",
-                  method_name);
-    }
+  this->process_client_req(plain_text);
 }
 
 void connection_t::register_deadline() {
@@ -1304,7 +1495,7 @@ void HttpClientSession::start()
 void HttpClientSession::trigger_callback(SNodeError error,
                                          std::shared_ptr<std::string>&& body) {
     ARQMA_LOG(trace, "Trigger callback");
-    ioc_.post(std::bind(callback_, sn_response_t{error, body}));
+    ioc_.post(std::bind(callback_, sn_response_t{error, body, boost::none}));
     used_callback_ = true;
     deadline_timer_.cancel();
 }

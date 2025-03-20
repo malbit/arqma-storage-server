@@ -11,20 +11,10 @@ struct net_stats_t {
   std::set<int> open_fds;
 
   void record_socket_open(int sockfd) {
-#ifdef INTEGRATION_TEST
-    if (open_fds.find(sockfd) != open_fds.end()) {
-      ARQMA_LOG(critical, "Already recorded as open: {}", sockfd);
-    }
-#endif
     open_fds.insert(sockfd);
   }
 
   void record_socket_close(int sockfd) {
-#ifdef INTEGRATION_TEST
-    if (open_fds.find(sockfd) == open_fds.end()) {
-      ARQMA_LOG(critical, "Socket is NOT recorded as open: {}", sockfd);
-    }
-#endif
     open_fds.erase(sockfd);
   }
 };

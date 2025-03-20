@@ -1,4 +1,17 @@
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+  foreach(lang C CXX)
+    if (NOT DEFINED CMAKE_${lang}_COMPILER_LAUNCHER AND NOT CMAKE_${lang}_COMPILER MATCHES ".*/ccache")
+      message(STATUS "Enabling ccache for ${lang}")
+      set(CMAKE_${lang}_COMPILER_LAUNCHER ${CCACHE_PROGRAM} CACHE STRING "")
+    endif()
+  endforeach()
+endif()
+
 cmake_minimum_required(VERSION 3.18)
+message(STATUS "Cmake version ${CMAKE_VERSION}")
 
 project(storage_server
   VERSION 1.0.0
@@ -17,7 +30,6 @@ if(POLICY CMP0167)
 endif()
 
 
-option(INTEGRATION_TEST "build for integration test" OFF)
 option(DISABLE_SNODE_SIGNATURE "Generate and verify signatures for inter-snode communication" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -41,19 +53,22 @@ else()
   set(IPO_ENABLED OFF)
 endif()
 
-if (INTEGRATION_TEST)
-    add_definitions(-DINTEGRATION_TEST)
-endif()
-
 if (DISABLE_SNODE_SIGNATURE)
     add_definitions(-DDISABLE_SNODE_SIGNATURE)
 endif()
 
-option(BUILD_TESTS "tests off" OFF)
-
 list (APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
-option(BUILD_STATIC_DEPS "Static" ON)
+find_package(Git)
+option(MANUAL_SUBMODULES "Don't check for submodules" OFF)
+if(NOT GIT_FOUND)
+  message(WARNING "Git not found, unable to clone submodules")
+else()
+  message(STATUS "Cloning Submodules")
+  execute_process(COMMAND git "submodule" "update" "--init" "--recursive" WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
+option(BUILD_STATIC_DEPS "Download, build and statically link against core dependencies" ON)
 if(BUILD_STATIC_DEPS)
   include(StaticBuild)
 else()
@@ -74,7 +89,3 @@ add_subdirectory(crypto)
 add_subdirectory(storage)
 add_subdirectory(httpserver)
 add_subdirectory(vendors)
-
-if (BUILD_TESTS)
-    add_subdirectory(unit_test)
-endif ()

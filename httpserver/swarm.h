@@ -6,10 +6,8 @@
 
 #include "arqma_common.h"
 
-namespace boost {
-namespace asio {
+namespace boost::asio {
 class io_context;
-}
 } // namespace boost
 
 namespace arqma {
@@ -29,6 +27,7 @@ struct block_update_t {
     uint64_t height;
     std::string block_hash;
     int hardfork;
+    bool unchanged = false;
 };
 
 swarm_id_t get_swarm_by_pk(const std::vector<SwarmInfo>& all_swarms,
@@ -96,6 +95,7 @@ class Swarm {
     boost::optional<sn_record_t> choose_funded_node() const;
     boost::optional<sn_record_t> find_node_by_port(uint16_t port) const;
     boost::optional<sn_record_t> get_node_by_pk(const sn_pub_key_t& pk) const;
+    boost::optional<sn_record_t> find_node_by_ed25519_pk(const sn_pub_key_t& address) const;
 };
 
 } // namespace arqma
