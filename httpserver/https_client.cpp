@@ -1,9 +1,12 @@
 #include "https_client.h"
 #include "arqma_logger.h"
-#include "signature.h"
 #include "net_stats.h"
+#include "signature.h"
 
 #include <openssl/x509.h>
+#include <boost/algorithm/string/erase.hpp>
+
+namespace sp = std::placeholders;
 
 namespace arqma {
 
@@ -17,25 +20,17 @@ void make_https_request(boost::asio::io_context& ioc,
 
     error_code ec;
     boost::asio::ip::tcp::resolver resolver(ioc);
-#ifdef INTEGRATION_TEST
-    const auto resolve_results =
-        resolver.resolve("0.0.0.0", std::to_string(port), ec);
-#else
-
     if (sn_address == "0.0.0.0") {
-        ARQMA_LOG(warn, "Could not initiate request to snode (we don't know "
-                       "their IP yet).");
+        ARQMA_LOG(debug, "Could not initiate request to snode (we don't know their IP yet).");
+
+        cb(sn_response_t{SNodeError::NO_REACH, nullptr});
         return;
     }
 
-    const auto resolve_results =
-        resolver.resolve(sn_address, std::to_string(port), ec);
-#endif
+    const auto resolve_results = resolver.resolve(sn_address, std::to_string(port), ec);
     if (ec) {
-        ARQMA_LOG(error,
-                 "https: Failed to parse the IP address. Error code = {}. "
-                 "Message: {}",
-                 ec.value(), ec.message());
+        ARQMA_LOG(error, "https: Failed to parse the IP address. Error code = {}. Message: {}",
+                  ec.value(), ec.message());
         return;
     }
 
@@ -46,6 +41,37 @@ void make_https_request(boost::asio::io_context& ioc,
         sn_pubkey_b32z);
 
     session->start();
+}
+
+void make_https_request(boost::asio::io_context& ioc, const std::string& url, const std::shared_ptr<request_t>& req, http_callback_t&& cb)
+{
+  static boost::asio::ip::tcp::resolver resolver(ioc);
+  constexpr char prefix[] = "https://";
+  std::string query = url;
+
+  if (url.find(prefix) == 0)
+    query.erase(0, sizeof(prefix) - 1);
+
+  boost::algorithm::erase_all(query, prefix);
+
+  auto resolve_handler = [&ioc, req, query, cb = std::move(cb)] (
+                           const boost::system::error_code& ec,
+                           boost::asio::ip::tcp::resolver::results_type resolve_results) mutable
+  {
+    if (ec)
+    {
+      ARQMA_LOG(error, "DNS resolution error for {}: {}", query, ec.message());
+      return;
+    }
+
+    static ssl::context ctx{ssl::context::tlsv12_client};
+
+    auto session = std::make_shared<HttpsClientSession>(ioc, ctx, std::move(resolve_results), req, std::move(cb), boost::none);
+    session->start();
+  };
+
+  constexpr char https_port[] = "443";
+  resolver.async_resolve(query, https_port, boost::asio::ip::tcp::resolver::query::numeric_service, resolve_handler);
 }
 
 static std::string x509_to_string(X509* x509) {
@@ -71,13 +97,16 @@ HttpsClientSession::HttpsClientSession(
     boost::asio::io_context& ioc, ssl::context& ssl_ctx,
     tcp::resolver::results_type resolve_results,
     const std::shared_ptr<request_t>& req, http_callback_t&& cb,
-    const std::string& sn_pubkey_b32z)
+    boost::optional<const std::string&> sn_pubkey_b32z)
     : ioc_(ioc), ssl_ctx_(ssl_ctx), resolve_results_(resolve_results),
       callback_(cb), deadline_timer_(ioc), stream_(ioc, ssl_ctx_), req_(req),
-      server_pub_key_b32z(sn_pubkey_b32z) {
+      server_pub_key_b32z_(sn_pubkey_b32z) {
 
-          get_net_stats().https_connections_out++;
-      }
+    get_net_stats().https_connections_out++;
+
+    static uint64_t connection_count = 0;
+    this->connection_idx = connection_count++;
+}
 
 void HttpsClientSession::start() {
     // Set SNI Hostname (many hosts need this to handshake successfully)
@@ -96,11 +125,12 @@ void HttpsClientSession::start() {
             if (ec) {
                 /// Don't forget to print the error from where we call this!
                 /// (similar to http)
-                ARQMA_LOG(debug,
-                         "[https client]: could not connect to {}:{}, message: "
-                         "{} ({})",
-                         endpoint.address().to_string(), endpoint.port(),
-                         ec.message(), ec.value());
+                ARQMA_LOG(
+                    debug,
+                    "[https client]: could not connect to {}:{}, message: "
+                    "{} ({})",
+                    endpoint.address().to_string(), endpoint.port(),
+                    ec.message(), ec.value());
                 trigger_callback(SNodeError::NO_REACH, nullptr);
                 return;
             }
@@ -114,55 +144,56 @@ void HttpsClientSession::start() {
             if (ec) {
                 if (ec != boost::asio::error::operation_aborted) {
                     ARQMA_LOG(error,
-                             "Deadline timer failed in https client session "
-                             "[{}: {}]",
-                             ec.value(), ec.message());
+                              "Deadline timer failed in https client session "
+                              "[{}: {}]",
+                              ec.value(), ec.message());
                 }
             } else {
-                ARQMA_LOG(warn, "client socket timed out");
+                ARQMA_LOG(debug, "client socket timed out");
                 self->do_close();
             }
         });
 }
 
-void HttpsClientSession::on_connect() {
-    ARQMA_LOG(trace, "on connect");
-    stream_.set_verify_mode(ssl::verify_none);
-    stream_.set_verify_callback(
-        [this](bool preverified, ssl::verify_context& ctx) -> bool {
-            if (!preverified) {
-                X509_STORE_CTX* handle = ctx.native_handle();
-                X509* x509 = X509_STORE_CTX_get0_cert(handle);
-                server_cert_ = x509_to_string(x509);
-            }
-            return true;
-        });
-    stream_.async_handshake(ssl::stream_base::client,
-                            std::bind(&HttpsClientSession::on_handshake,
-                                      shared_from_this(),
-                                      std::placeholders::_1));
+void HttpsClientSession::on_connect()
+{
+  ARQMA_LOG(trace, "on connect, connection idx: {}", this->connection_idx);
+
+  const auto sockfd = stream_.lowest_layer().native_handle();
+  ARQMA_LOG(debug, "Open https socket: {}", sockfd);
+  get_net_stats().record_socket_open(sockfd);
+
+  stream_.set_verify_mode(ssl::verify_none);
+  stream_.set_verify_callback([this](bool preverified, ssl::verify_context& ctx) -> bool {
+    if (!preverified) {
+      X509_STORE_CTX* handle = ctx.native_handle();
+      X509* x509 = X509_STORE_CTX_get0_cert(handle);
+      server_cert_ = x509_to_string(x509);
+    }
+    return true;
+  });
+  stream_.async_handshake(ssl::stream_base::client, std::bind(&HttpsClientSession::on_handshake,
+                          shared_from_this(), sp::_1));
 }
 
 void HttpsClientSession::on_handshake(boost::system::error_code ec) {
     if (ec) {
         ARQMA_LOG(error, "Failed to perform a handshake with {}: {}",
-                 server_pub_key_b32z, ec.message());
+                  server_pub_key_b32z_ ? *server_pub_key_b32z_ : "(not snode)", ec.message());
 
         return;
     }
 
-    http::async_write(stream_, *req_,
-                      std::bind(&HttpsClientSession::on_write,
-                                shared_from_this(), std::placeholders::_1,
-                                std::placeholders::_2));
+    http::async_write(stream_, *req_, std::bind(&HttpsClientSession::on_write,
+                      shared_from_this(), sp::_1, sp::_2));
 }
 
 void HttpsClientSession::on_write(error_code ec, size_t bytes_transferred) {
 
     ARQMA_LOG(trace, "on write");
     if (ec) {
-        ARQMA_LOG(error, "Error on write, ec: {}. Message: {}", ec.value(),
-                 ec.message());
+        ARQMA_LOG(error, "Https error on write, ec: {}. Message: {}", ec.value(),
+                  ec.message());
         trigger_callback(SNodeError::ERROR_OTHER, nullptr);
         return;
     }
@@ -170,45 +201,47 @@ void HttpsClientSession::on_write(error_code ec, size_t bytes_transferred) {
     ARQMA_LOG(trace, "Successfully transferred {} bytes.", bytes_transferred);
 
     // Receive the HTTP response
-    http::async_read(stream_, buffer_, res_,
-                     std::bind(&HttpsClientSession::on_read, shared_from_this(),
-                               std::placeholders::_1, std::placeholders::_2));
+    http::async_read(stream_, buffer_, res_, std::bind(&HttpsClientSession::on_read,
+                     shared_from_this(), sp::_1, sp::_2));
 }
 
-bool HttpsClientSession::verify_signature() {
+bool HttpsClientSession::verify_signature()
+{
+    if (server_pub_key_b32z_)
+      return true;
+
     const auto it = res_.find(ARQMA_SNODE_SIGNATURE_HEADER);
     if (it == res_.end()) {
         ARQMA_LOG(warn, "no signature found in header from {}",
-                 server_pub_key_b32z);
+                  *server_pub_key_b32z_);
         return false;
     }
     // signature is expected to be base64 enoded
     const auto signature = it->value().to_string();
     const auto hash = hash_data(server_cert_);
-    return check_signature(signature, hash, server_pub_key_b32z);
+    return check_signature(signature, hash, *server_pub_key_b32z_);
 }
 
 void HttpsClientSession::on_read(error_code ec, size_t bytes_transferred) {
 
     ARQMA_LOG(trace, "Successfully received {} bytes", bytes_transferred);
 
-    std::shared_ptr<std::string> body = nullptr;
-
     if (!ec || (ec == http::error::end_of_stream)) {
 
         if (http::to_status_class(res_.result_int()) ==
             http::status_class::successful) {
 
-            if (!verify_signature()) {
-                ARQMA_LOG(debug, "Bad signature from {}", server_pub_key_b32z);
-                trigger_callback(SNodeError::ERROR_OTHER, nullptr);
-                return;
+            if (server_pub_key_b32z_ && !verify_signature()) {
+                ARQMA_LOG(debug, "Bad signature from {}", *server_pub_key_b32z_);
+                trigger_callback(SNodeError::ERROR_OTHER, nullptr, res_);
             }
-
-            body = std::make_shared<std::string>(res_.body());
-            trigger_callback(SNodeError::NO_ERROR, std::move(body));
+            else
+            {
+              auto body = std::make_shared<std::string>(res_.body());
+              trigger_callback(SNodeError::NO_ERROR, std::move(body), res_);
+            }
         } else {
-            trigger_callback(SNodeError::ERROR_OTHER, nullptr);
+            trigger_callback(SNodeError::ERROR_OTHER, nullptr, res_);
         }
 
     } else {
@@ -216,8 +249,8 @@ void HttpsClientSession::on_read(error_code ec, size_t bytes_transferred) {
         /// Do we need to handle `operation aborted` separately here (due to
         /// deadline timer)?
         ARQMA_LOG(error, "Error on read: {}. Message: {}", ec.value(),
-                 ec.message());
-        trigger_callback(SNodeError::ERROR_OTHER, nullptr);
+                  ec.message());
+        trigger_callback(SNodeError::ERROR_OTHER, nullptr, res_);
     }
 
     // Gracefully close the socket
@@ -233,9 +266,9 @@ void HttpsClientSession::on_read(error_code ec, size_t bytes_transferred) {
     // If we get here then the connection is closed gracefully
 }
 
-void HttpsClientSession::trigger_callback(SNodeError error,
-                                          std::shared_ptr<std::string>&& body) {
-    ioc_.post(std::bind(callback_, sn_response_t{error, body}));
+void HttpsClientSession::trigger_callback(SNodeError error, std::shared_ptr<std::string>&& body, boost::optional<response_t> raw_response)
+{
+    ioc_.post(std::bind(callback_, sn_response_t{error, body, raw_response}));
     used_callback_ = true;
     deadline_timer_.cancel();
 }
@@ -243,24 +276,26 @@ void HttpsClientSession::trigger_callback(SNodeError error,
 void HttpsClientSession::do_close() {
     // Gracefully close the stream
     stream_.async_shutdown(std::bind(&HttpsClientSession::on_shutdown,
-                                     shared_from_this(),
-                                     std::placeholders::_1));
+                                     shared_from_this(), sp::_1));
 }
 
-void HttpsClientSession::on_shutdown(boost::system::error_code ec) {
-    if (ec == boost::asio::error::eof) {
-        // Rationale:
-        // http://stackoverflow.com/questions/25587403/boost-asio-ssl-async-shutdown-always-finishes-with-an-error
-        ec.assign(0, ec.category());
-    }
-    if (ec) {
-        ARQMA_LOG(error, "could not shutdown stream gracefully: {}",
-                 ec.message());
-    }
+void HttpsClientSession::on_shutdown(boost::system::error_code ec)
+{
+  if (ec == boost::asio::error::eof) {
+    // Rationale:
+    // http://stackoverflow.com/questions/25587403/boost-asio-ssl-async-shutdown-always-finishes-with-an-error
+    ec.assign(0, ec.category());
+  } else if (ec) {
+    ARQMA_LOG(debug, "could not shutdown stream gracefully: {} ({})", ec.message(), ec.value());
+  }
 
-    stream_.lowest_layer().close();
+  const auto sockfd = stream_.lowest_layer().native_handle();
+  ARQMA_LOG(debug, "Close https socket: {}", sockfd);
+  get_net_stats().record_socket_close(sockfd);
 
-    // If we get here then the connection is closed gracefully
+  stream_.lowest_layer().close();
+
+  // If we get here then the connection is closed gracefully
 }
 
 /// We execute callback (if haven't already) here to make sure it is called

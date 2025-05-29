@@ -1,15 +1,15 @@
 #include "command_line.h"
 #include "arqma_logger.h"
 
-#include <boost/filesystem.hpp>
 #include <boost/optional.hpp>
 
+#include <filesystem>
 #include <iostream>
 
 namespace arqma {
 
 namespace po = boost::program_options;
-namespace fs = boost::filesystem;
+namespace fs = std::filesystem;
 
 const command_line_options& command_line_parser::get_options() const {
     return options_;
@@ -20,11 +20,12 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
     po::options_description all, hidden;
     // clang-format off
     desc_.add_options()
-        ("arqmad-key", po::value(&options_.arqmad_key_path), "Path to the Service Node key file")
         ("data-dir", po::value(&options_.data_dir), "Path to persistent data (defaults to ~/.arqma/storage)")
         ("config-file", po::value(&config_file), "Path to custom config file (defaults to `storage-server.conf' inside --data-dir)")
         ("log-level", po::value(&options_.log_level), "Log verbosity level, see Log Levels below for accepted values")
+        ("arqmad-rpc-ip", po::value(&options_.arqmad_rpc_ip), "RPC IP on which the local Arqma daemon is listening (commonly localhost)")
         ("arqmad-rpc-port", po::value(&options_.arqmad_rpc_port), "RPC port on which the local Arqma daemon is listening")
+        ("stagenet", po::bool_switch(&options_.stagenet), "Start storage server in stagenet mode")
         ("force-start", po::bool_switch(&options_.force_start), "Ignore the initialisation ready check")
         ("version,v", po::bool_switch(&options_.print_version), "Print the version of this binary")
         ("help", po::bool_switch(&options_.print_help),"Shows this help message");
@@ -33,7 +34,10 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
         // and `port=` in the config file to specify them.
     hidden.add_options()
         ("ip", po::value(&options_.ip), "IP to listen on")
-        ("port", po::value(&options_.port), "Port to listen on");
+        ("port", po::value(&options_.port), "Port to listen on")
+        ("arqmad-key", po::value(&options_.arqmad_key), "Legacy secret key (test only)")
+        ("arqmad-x25519-key", po::value(&options_.arqmad_x25519_key), "x25519 secret key (test only)")
+        ("arqmad-ed25519-key", po::value(&options_.arqmad_ed25519_key), "ed25519 public key (test only)");
     // clang-format on
 
     all.add(desc_).add(hidden);
@@ -41,7 +45,7 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
     pos_desc.add("ip", 1);
     pos_desc.add("port", 1);
 
-    binary_name_ = fs::basename(argv[0]);
+    binary_name_ = fs::u8path(argv[0]).filename().u8string();
 
     po::variables_map vm;
 
@@ -52,13 +56,10 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
               vm);
     po::notify(vm);
 
-    if (config_file.empty()) {
-        config_file =
-            (fs::path(options_.data_dir) / "storage-server.conf").string();
-    }
+    fs::path config_path{!config_file.empty() ? fs::u8path(config_file) : fs::u8path(options_.data_dir) / "storage-server.conf"};
 
-    if (fs::exists(config_file)) {
-        po::store(po::parse_config_file<char>(config_file.c_str(), all), vm);
+    if (fs::exists(config_path)) {
+        po::store(po::parse_config_file<char>(config_path.u8string().c_str(), all), vm);
         po::notify(vm);
     } else if (vm.count("config-file")) {
         throw std::runtime_error(
@@ -67,6 +68,10 @@ void command_line_parser::parse_args(int argc, char* argv[]) {
 
     if (options_.print_version || options_.print_help) {
         return;
+    }
+
+    if (options_.stagenet && !vm.count("arqmad-rpc-port")) {
+      options_.arqmad_rpc_port = 39994;
     }
 
     if (!vm.count("ip") || !vm.count("port")) {

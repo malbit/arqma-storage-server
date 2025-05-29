@@ -11,7 +11,7 @@ struct time_entry_t {
     time_t timestamp;
 };
 
-enum class ResultType { OK, MISMATCH, OTHER };
+enum class ResultType { OK, MISMATCH, OTHER, REJECTED };
 
 struct test_result_t {
 
@@ -21,14 +21,12 @@ struct test_result_t {
 };
 
 inline const char* to_str(ResultType result) {
-    switch (result) {
-    case ResultType::OK:
-        return "OK";
-    case ResultType::MISMATCH:
-        return "MISMATCH";
+  switch (result) {
+    case ResultType::OK: return "OK";
+    case ResultType::MISMATCH: return "MISMATCH";
+    case ResultType::REJECTED: return "REJECTED";
     case ResultType::OTHER:
-    default:
-        return "OTHER";
+    default: return "OTHER";
     }
 }
 
@@ -113,9 +111,7 @@ class all_stats_t {
         return total_client_store_requests;
     }
 
-    uint64_t get_recent_store_requests() const {
-        return recent_store_requests;
-    }
+    uint64_t get_recent_store_requests() const { return recent_store_requests; }
 
     uint64_t get_previous_period_store_requests() const {
         return previous_period_store_requests;
@@ -132,7 +128,6 @@ class all_stats_t {
     uint64_t get_previous_period_retrieve_requests() const {
         return previous_period_retrieve_requests;
     }
-
 
     time_t get_reset_time() const { return reset_time_; }
 };

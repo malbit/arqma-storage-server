@@ -1,23 +1,26 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
 
-#include "../external/json.hpp"
+#include <nlohmann/json_fwd.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl/stream.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
-#include <boost/filesystem.hpp>
 #include <boost/format.hpp>
 
+#include "arqmad_key.h"
 #include "swarm.h"
 
 constexpr auto ARQMA_SENDER_SNODE_PUBKEY_HEADER = "X-Arqma-Snode-PubKey";
 constexpr auto ARQMA_SNODE_SIGNATURE_HEADER = "X-Arqma-Snode-Signature";
+constexpr auto ARQMA_SENDER_KEY_HEADER = "X-Arqma-Sender-Public-Key";
+constexpr auto ARQMA_TARGET_SNODE_KEY = "X-Arqma-Target-Snode-Key";
 
 template <typename T>
 class ChannelEncryption;
@@ -31,6 +34,9 @@ using request_t = http::request<http::string_body>;
 using response_t = http::response<http::string_body>;
 
 namespace arqma {
+
+std::shared_ptr<request_t> build_post_request(const char* target, std::string&& data);
+
 struct message_t;
 struct Security;
 
@@ -45,7 +51,30 @@ enum class SNodeError { NO_ERROR, ERROR_OTHER, NO_REACH, HTTP_ERROR };
 struct sn_response_t {
     SNodeError error_code;
     std::shared_ptr<std::string> body;
+    boost::optional<response_t> raw_response;
 };
+
+template <typename OStream>
+OStream& operator<<(OStream& os, const sn_response_t& res)
+{
+  switch (res.error_code)
+  {
+    case SNodeError::NO_ERROR:
+      os << "NO_ERROR";
+      break;
+    case SNodeError::ERROR_OTHER:
+      os << "ERROR_OTHER";
+      break;
+    case SNodeError::NO_REACH:
+      os << "NO_REACH";
+      break;
+    case SNodeError::HTTP_ERROR:
+      os << "HTTP_ERROR";
+      break;
+  }
+
+  return os << "(" << (res.body ? *res.body : "n/a") << ")";
+}
 
 struct blockchain_test_answer_t {
     uint64_t res_height;
@@ -61,20 +90,23 @@ using http_callback_t = std::function<void(sn_response_t)>;
 
 class ArqmadClient {
 
-    const uint16_t arqmad_rpc_port_;
-    const char* local_ip_ = "127.0.0.1";
     boost::asio::io_context& ioc_;
+    std::string arqmad_rpc_ip_;
+    const uint16_t arqmad_rpc_port_;
 
   public:
-    ArqmadClient(boost::asio::io_context& ioc, uint16_t port);
+    ArqmadClient(boost::asio::io_context& ioc, std::string ip, uint16_t port);
     void make_arqmad_request(boost::string_view method,
-                            const nlohmann::json& params,
-                            http_callback_t&& cb) const;
-    void make_arqmad_request(const std::string& daemon_ip,
-                            const uint16_t daemon_port,
-                            boost::string_view method,
-                            const nlohmann::json& params,
-                            http_callback_t&& cb) const;
+                             const nlohmann::json& params,
+                             http_callback_t&& cb) const;
+    void make_custom_arqmad_request(const std::string& daemon_ip,
+                                    const uint16_t daemon_port,
+                                    boost::string_view method,
+                                    const nlohmann::json& params,
+                                    http_callback_t&& cb) const;
+
+    std::tuple<private_key_t, private_key_ed25519_t, private_key_t>
+    wait_for_privkey();
 };
 
 constexpr auto SESSION_TIME_LIMIT = std::chrono::seconds(30);
@@ -104,6 +136,7 @@ class HttpClientSession
     response_t res_;
 
     bool used_callback_ = false;
+    bool needs_cleanup = false;
 
     void on_connect();
 
@@ -111,8 +144,9 @@ class HttpClientSession
 
     void on_read(boost::system::error_code ec, std::size_t bytes_transferred);
 
-    void trigger_callback(SNodeError error,
-                          std::shared_ptr<std::string>&& body);
+    void trigger_callback(SNodeError error, std::shared_ptr<std::string>&& body);
+
+    void clean_up();
 
   public:
     // Resolver and socket require an io_context
@@ -144,8 +178,7 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     ssl::stream<tcp::socket&> stream_;
     const Security& security_;
 
-    // The request message.
-    request_t request_;
+    http::request_parser<http::string_body> request_;
 
     // The response message.
     response_t response_;
@@ -189,6 +222,7 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     };
 
     boost::optional<notification_context_t> notification_ctx_;
+    boost::optional<std::function<void(response_t&)>> response_modifier_;
 
   public:
     connection_t(boost::asio::io_context& ioc, ssl::context& ssl_ctx,
@@ -228,6 +262,8 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     /// (synchronously).
     void process_request();
 
+    void clean_up();
+
     void process_store(const nlohmann::json& params);
 
     void process_retrieve(const nlohmann::json& params);
@@ -243,9 +279,12 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
     void write_response();
 
     /// Syncronously (?) process client store/load requests
-    void process_client_req();
+    void process_client_req_rate_limited();
+    void process_client_req(const std::string& req_json);
 
     void process_swarm_req(boost::string_view target);
+    void process_proxy_req();
+    void process_file_proxy_req();
 
     // Check whether we have spent enough time on this connection.
     void register_deadline();
@@ -255,23 +294,52 @@ class connection_t : public std::enable_shared_from_this<connection_t> {
                                   const std::string& tester_addr,
                                   const std::string& msg_hash);
 
+    void process_blockchain_test_req(uint64_t height,
+                                     const std::string& tester_pk,
+                                     bc_test_params_t params);
+
     bool parse_header(const char* key);
 
     template <typename... Args>
     bool parse_header(const char* first, Args... args);
 
-    void handle_wrong_swarm(const std::string& pubKey);
+    void handle_wrong_swarm(const user_pubkey_t& pubKey);
 
     bool validate_snode_request();
-    bool verify_signature(const std::string& signature,
-                          const std::string& public_key_b32z);
+    bool verify_signature(const std::string& signature, const std::string& public_key_b32z);
 };
 
 void run(boost::asio::io_context& ioc, const std::string& ip, uint16_t port,
-         const boost::filesystem::path& base_path, ServiceNode& sn,
+         const std::filesystem::path& base_path, ServiceNode& sn,
          ChannelEncryption<std::string>& channelEncryption,
          RateLimiter& rate_limiter, Security&);
 
 } // namespace http_server
 
+constexpr const char* error_string(SNodeError err) {
+  switch (err) {
+    case arqma::SNodeError::NO_ERROR: return "NO_ERROR";
+    case arqma::SNodeError::ERROR_OTHER: return "ERROR_OTHER";
+    case arqma::SNodeError::NO_REACH: return "NO_REACH";
+    case arqma::SNodeError::HTTP_ERROR: return "HTTP_ERROR";
+    default: return "[UNKNOWN]";
+  }
+}
+
 } // namespace arqma
+
+namespace fmt {
+template <>
+struct formatter<arqma::SNodeError> {
+    template <typename ParseContext>
+    constexpr auto parse(ParseContext& ctx) {
+        return ctx.begin();
+    }
+
+    template <typename FormatContext>
+    auto format(const arqma::SNodeError& err, FormatContext& ctx) {
+      return format_to(ctx.out(), error_string(err));
+    }
+};
+
+} // namespace fmt

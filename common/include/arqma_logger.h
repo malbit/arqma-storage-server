@@ -2,15 +2,15 @@
 
 #include "spdlog/spdlog.h"
 
-#define ARQMA_LOG_N(LVL, msg, ...)                                              \
+#define ARQMA_LOG_N(LVL, msg, ...)                                             \
     spdlog::get("arqma_logger")->LVL("[{}] " msg, __func__, __VA_ARGS__)
-#define ARQMA_LOG_2(LVL, msg)                                                   \
-    spdlog::get("arqma_logger")->LVL("[{}] " msg, __func__);
+#define ARQMA_LOG_2(LVL, msg)                                                  \
+    spdlog::get("arqma_logger")->LVL("[{}] " msg, __func__)
 
 #define GET_MACRO(_1, _2, _3, _4, _5, _6, _7, _8, _9, NAME, ...) NAME
-#define ARQMA_LOG(...)                                                          \
-    GET_MACRO(__VA_ARGS__, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N,     \
-              ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_2)                  \
+#define ARQMA_LOG(...)                                                         \
+    GET_MACRO(__VA_ARGS__, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N, \
+              ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_N, ARQMA_LOG_2)              \
     (__VA_ARGS__)
 
 namespace arqma {

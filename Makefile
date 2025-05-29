@@ -1,70 +1,55 @@
-SUB_DIR:=$(shell echo  `uname | sed -e 's|[:/\\ \(\)]|_|g'`/`git branch | grep '\* ' | cut -f2- -d' '| sed -e 's|[:/\\ \(\)]|_|g'`)
 
-ifeq ($(DEBUG),)
-	BUILD_TYPE := Release
-else
-	BUILD_TYPE := Debug
+dotgit=$(shell ls -d .git/config)
+ifneq ($(dotgit), .git/config)
+  USE_SINGLE_BUILDDIR=1
 endif
 
-ifeq ($(USE_SINGLE_BUILD_DIR),)
-  BUILD_DIR := build/$(SUB_DIR)/$(BUILD_TYPE)
-  TOP_DIR   := ../../../..
+subbuilddir:=$(shell echo  `uname | sed -e 's|[:/\\ \(\)]|_|g'`/`git branch | grep '\* ' | cut -f2- -d' '| sed -e 's|[:/\\ \(\)]|_|g'`)
+ifeq ($(USE_SINGLE_BUILDDIR),)
+  builddir := build/"$(subbuilddir)"
+  topdir   := ../../../..
+  deldirs  := $(builddir)
 else
-  BUILD_DIR := build
-  TOP_DIR   := ..
+  builddir := build
+  topdir   := ../..
+  deldirs  := $(builddir)/debug $(builddir)/release
 endif
 
-ifeq ($(GEN),)
-	CMAKE := cmake
-else
-	CMAKE := cmake -G$(GEN)
-endif
+all: release-all
 
-BUILD_TESTS ?= ON
+debug: debug-all
 
-BUILD_STATIC ?= ON
+debug-all:
+	mkdir -p $(builddir)/debug
+	cd $(builddir)/debug && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Debug -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
 
-MKDIR := mkdir -p $(BUILD_DIR) && cd $(BUILD_DIR)
+debug-sig-off:
+	mkdir -p $(builddir)/debug
+	cd $(builddir)/debug && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Debug -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
 
-all:
-	$(MKDIR) && \
-	$(CMAKE) \
-		-DBoost_USE_STATIC_LIBS=$(BUILD_STATIC) \
-		-DOPENSSL_USE_STATIC_LIBS=$(BUILD_STATIC) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DBUILD_TESTS=$(BUILD_TESTS) \
-		-DDISABLE_SNODE_SIGNATURE=OFF \
-		$(TOP_DIR) \
-		&& cmake --build .
+release-all:
+	mkdir -p $(builddir)/release
+	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
 
-integration-test:
-	$(MKDIR) && \
-	$(CMAKE) $(TOP_DIR) \
-		-DBoost_USE_STATIC_LIBS=$(BUILD_STATIC) \
-		-DOPENSSL_USE_STATIC_LIBS=$(BUILD_STATIC) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DBUILD_TESTS=$(BUILD_TESTS) \
-		-DINTEGRATION_TEST=ON \
-		&& cmake --build .
-
-tests: all
-	./$(BUILD_DIR)/unit_test/Test --log_level=all
+release-sig-off:
+	mkdir -p $(builddir)/release
+	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
 
 clean:
-	rm -rf build/$(SUB_DIR)
+	rm -rf $(deldirs)
 
 clean-all:
-	rm -rf build
+	rm -rf ./build
 
 format:
 	clang-format -style=file -i \
-		pow/**/*.{cpp,hpp} \
 		crypto/**/*.{cpp,hpp} \
 		storage/**/*.{cpp,hpp} \
 		utils/**/*.{cpp,hpp} \
 		httpserver/*.{cpp,h} \
-		unit_test/*.cpp \
 		common/**/*.{cpp,h}
 
+tags:
+	ctags -R --sort=1 --c++-kinds=+p --fields=+iaS --extra=+q --language-force=C++ common crypto httpserver storage utils vendors
 
-.PHONY: all clean format rebuild
+.PHONY: all release-all debug debug-all clean format tags

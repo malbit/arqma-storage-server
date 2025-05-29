@@ -1,14 +1,14 @@
-#include "../external/json.hpp"
 #include "dns_text_records.h"
+#include <nlohmann/json.hpp>
 #include "version.h"
-#include "pow.hpp"
+#include <netinet/in.h>
 #include <resolv.h>
+#include <charconv>
 
 #include <boost/algorithm/string.hpp>
 
 using json = nlohmann::json;
 
-static constexpr char POW_DIFFICULTY_URL[] = "sentinel.messenger.arqma.com";
 static constexpr char LATEST_VERSION_URL[] = "storage.version.arqma.com";
 
 namespace arqma {
@@ -61,30 +61,6 @@ static std::string get_dns_record(const char* url, std::error_code& ec) {
     return data;
 }
 
-std::vector<pow_difficulty_t> query_pow_difficulty(std::error_code& ec) {
-    ARQMA_LOG(debug, "Querying PoW difficulty...");
-
-    std::vector<pow_difficulty_t> new_history;
-    const std::string data = get_dns_record(POW_DIFFICULTY_URL, ec);
-    if (ec) {
-        return new_history;
-    }
-
-    try {
-        const json history = json::parse(data, nullptr, true);
-        for (const auto& el : history.items()) {
-            const std::chrono::milliseconds timestamp(std::stoul(el.key()));
-            const int difficulty = el.value().get<int>();
-            new_history.push_back(pow_difficulty_t{timestamp, difficulty});
-        }
-        return new_history;
-    } catch (const std::exception& e) {
-        ARQMA_LOG(warn, "JSON parsing of PoW data failed: {}", e.what());
-        ec = std::make_error_code(std::errc::bad_message);
-        return new_history;
-    }
-}
-
 static std::string query_latest_version() {
     ARQMA_LOG(debug, "Querying Latest Version...");
 
@@ -96,101 +72,55 @@ static std::string query_latest_version() {
     }
 
     return version_str;
-
 }
 
-struct version_t {
-    int major;
-    int minor;
-    int patch;
-};
-
-static bool is_old_version(version_t ours, version_t latest) {
-
-    if (ours.major > latest.major) {
-        return false;
-    }
-
-    if (ours.major < latest.major) {
-        return true;
-    }
-
-    // === the same major version ===
-
-    if (ours.minor > latest.minor) {
-        return false;
-    }
-
-    if (ours.minor < latest.minor) {
-        return true;
-    }
-
-    // === the same minor version ===
-
-    if (ours.patch >= latest.patch) {
-        return false;
-    } else {
-        return true;
-    }
-
-}
+using version_t = std::array<uint16_t, 3>;
 
 static bool parse_version(const std::string& str, version_t& version_out) {
     std::vector<std::string> strs;
     strs.reserve(3);
     boost::split(strs, str, boost::is_any_of("."));
-    if (strs.size() != 3) {
-        ARQMA_LOG(warn, "Invalid format for the Storage Server version!");
+    if (strs.size() != 3)
         return false;
-    }
 
-    try {
-        version_out.major = std::stoi(strs[0]);
-        version_out.minor = std::stoi(strs[1]);
-        version_out.patch = std::stoi(strs[2]);
-    } catch (const std::exception& e) {
-        ARQMA_LOG(warn, "Invalid format for the Storage Server version! Error: {}", e.what());
+    for (size_t i = 0; i < 3; i++)
+    {
+      auto* end = strs[i].data() + strs[i].size();
+      auto [p, ec] = std::from_chars(strs[i].data(), end, version_out[i]);
+      if (ec != std::errc() || p != end)
         return false;
     }
 
     return true;
 }
 
-
 void check_latest_version() {
 
     const auto latest_version_str = query_latest_version();
 
     if (latest_version_str.empty()) {
-        ARQMA_LOG(warn, "Failed to retrieve or parse the latest version number from DNS record");
+        ARQMA_LOG(warn, "Failed to retrieve or parse the latest version number "
+                        "from DNS record");
         return;
     }
 
     version_t latest_version;
     if (!parse_version(latest_version_str, latest_version)) {
-        ARQMA_LOG(warn, "Could not parse the latest version: {}", latest_version_str);
+        ARQMA_LOG(warn, "Could not parse the latest version: {}",
+                  latest_version_str);
         return;
     }
 
-    // Note: we shouldn't have to parse our version every time, but we don't care about performance here
-    version_t our_version;
-    if (!parse_version(STORAGE_SERVER_VERSION_STRING, our_version)) {
-        ARQMA_LOG(warn, "Could not parse our version: {}", STORAGE_SERVER_VERSION_STRING);
-        return;
-    }
-
-    if (is_old_version(our_version, latest_version)) {
+    if (STORAGE_SERVER_VERSION < latest_version) {
         ARQMA_LOG(warn,
-                 "You are using an outdated version of the storage server "
-                 "({}), please update to {}!",
-                 STORAGE_SERVER_VERSION_STRING, latest_version_str);
+                  "You are using an outdated version of the storage server "
+                  "({}), please update to {}!",
+                  STORAGE_SERVER_VERSION_STRING, latest_version_str);
     } else {
-        ARQMA_LOG(
-            debug,
-            "You are using the latest version of the storage server ({})",
-            latest_version_str);
+        ARQMA_LOG(debug,
+                  "You are using the latest version of the storage server ({})",
+                  STORAGE_SERVER_VERSION_STRING);
     }
-
 }
 
 } // namespace dns
