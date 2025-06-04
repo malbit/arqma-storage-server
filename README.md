@@ -1,11 +1,33 @@
 # arqma-storage-server
 Storage server for Arqma Service Nodes
 
+Requirements:
+
+Boost >= 1.66 (for boost.beast)
+
+OpenSSL >= 1.1.1a (for X25519 curves)
+
+sodium >= 1.0.16 (for ed25119 to curve25519 conversion)
+
+Building from git clone:
 ```
-USE_SINGLE_BUILDDIR=1 make all
+git submodule update --init
+mkdir build && cd build
+cmake -DDISABLE_SNODE_SIGNATURE=OFF -DCMAKE_BUILD_TYPE=Release ..
+cmake --build .
 cd build/release/binaries
+./arqma-storage 0.0.0.0 8080
+```
+
+The paths for Boost and OpenSSL can be specified by exporting the variables in the terminal before running make:
+
+```
+export OPENSSL_ROOT_DIR = ...
+export BOOST_ROOT= ...
+```
 
 To get command line options just run:
+```
 ./arqma-storage --help
 ```
 
