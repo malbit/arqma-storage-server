@@ -29,11 +29,11 @@ debug-sig-off:
 
 release-all:
 	mkdir -p $(builddir)/release
-	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
+	cd $(builddir)/release && cmake -D CMAKE_POLICY_VERSION_MINIMUM=3.18 -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
 
 release-sig-off:
 	mkdir -p $(builddir)/release
-	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
+	cd $(builddir)/release && cmake -D CMAKE_POLICY_VERSION_MINIMUM=3.18 -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
 
 clean:
 	rm -rf $(deldirs)
