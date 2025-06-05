@@ -13,12 +13,16 @@ Building from git clone:
 ```
 git submodule update --init
 mkdir build && cd build
-cmake -DDISABLE_SNODE_SIGNATURE=OFF -DCMAKE_BUILD_TYPE=Release ..
-cmake --build .
+USE_SINGLE_BUILDDIR=1 make all
 cd build/release/binaries
-./arqma-storage 0.0.0.0 8080
 ```
 
+To run the storage-server:
+```
+./arqma-storage 0.0.0.0 19996 --arqmq-port 19996
+```
+Replace the 0.0.0.0 with your IP of the hardware running the Storage-Server
+Ensure your ports are open to allow communication to other network Storage-servers
 The paths for Boost and OpenSSL can be specified by exporting the variables in the terminal before running make:
 
 ```
