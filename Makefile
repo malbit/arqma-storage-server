@@ -1,4 +1,3 @@
-
 dotgit=$(shell ls -d .git/config)
 ifneq ($(dotgit), .git/config)
   USE_SINGLE_BUILDDIR=1
@@ -21,19 +20,19 @@ debug: debug-all
 
 debug-all:
 	mkdir -p $(builddir)/debug
-	cd $(builddir)/debug && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Debug -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
+	cd $(builddir)/debug && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_POLICY_VERSION_MINIMUM=3.18 -D CMAKE_BUILD_TYPE=Debug -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
 
 debug-sig-off:
 	mkdir -p $(builddir)/debug
-	cd $(builddir)/debug && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Debug -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
+	cd $(builddir)/debug && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_POLICY_VERSION_MINIMUM=3.18 -D CMAKE_BUILD_TYPE=Debug -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
 
 release-all:
 	mkdir -p $(builddir)/release
-	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
+	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_POLICY_VERSION_MINIMUM=3.18 -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=OFF $(topdir) && $(MAKE)
 
 release-sig-off:
 	mkdir -p $(builddir)/release
-	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
+	cd $(builddir)/release && cmake -D BUILD_STATIC_DEPS=ON -D CMAKE_POLICY_VERSION_MINIMUM=3.18 -D CMAKE_BUILD_TYPE=Release -D DISABLE_SNODE_SIGNATURE=ON $(topdir) && $(MAKE)
 
 clean:
 	rm -rf $(deldirs)

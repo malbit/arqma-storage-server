@@ -37,7 +37,7 @@ target_compile_definitions(httpserver_lib PUBLIC SPDLOG_COMPILED_LIB DISABLE_ENC
 set(BIN_NAME arqma-storage)
 
 add_executable(httpserver main.cpp)
-set_property(TARGET httpserver PROPERTY RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/binaries")
+set_property(TARGET httpserver PROPERTY RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/binaries")
 set_target_properties(httpserver PROPERTIES OUTPUT_NAME ${BIN_NAME})
 target_link_libraries(httpserver PRIVATE httpserver_lib)
 install(TARGETS httpserver DESTINATION bin)
